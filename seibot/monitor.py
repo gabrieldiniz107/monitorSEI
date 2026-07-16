@@ -113,9 +113,28 @@ def _cmd_dry_run(cfg: Config) -> dict:
     return {"status": "ok", "coletados": len(intims), "grupos": len(grupos), "novos": len(novos)}
 
 
+def _cmd_tratar(cfg: Config) -> dict:
+    """Fase 2 — MODO ENSAIO: só SELECIONA e lista os candidatos à tratativa
+    (individual + cliente ativo + Pendente). NÃO abre processo, NÃO dá ciência."""
+    from . import tratativa
+    from .login import fazer_login
+    clientes = clientes_mod.carregar_clientes()
+    with fazer_login(cfg) as sess:
+        intims = intimacoes.coletar(sess.page, cfg, paginas=cfg.run_paginas)
+    grupos = classificar.agrupar_por_oficio(intims)
+    candidatos = tratativa.selecionar_candidatos(grupos, clientes)
+    print(f"\n===== TRATAR (ENSAIO): {len(candidatos)} candidato(s) — NADA foi aberto =====")
+    for g in candidatos:
+        i = g.destinatarios[0]
+        print(f"  • {g.processo} | {g.oficio_desc} ({g.doc_id}) | {i.destinatario} — "
+              f"{i.documento_fmt} | {g.tipo_intimacao} | {g.situacao}")
+    return {"status": "ok", "modo": "ensaio", "coletados": len(intims),
+            "candidatos": len(candidatos)}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="seibot.monitor", description="Monitor de Intimações SEI")
-    parser.add_argument("comando", choices=["run", "baseline", "dry-run"])
+    parser.add_argument("comando", choices=["run", "baseline", "dry-run", "tratar"])
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -123,6 +142,8 @@ def main(argv=None) -> int:
         res = _cmd_run(cfg)
     elif args.comando == "baseline":
         res = _cmd_baseline(cfg)
+    elif args.comando == "tratar":
+        res = _cmd_tratar(cfg)
     else:
         res = _cmd_dry_run(cfg)
 

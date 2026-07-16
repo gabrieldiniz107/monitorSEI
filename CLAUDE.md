@@ -147,6 +147,40 @@ Individual **não-ativo/fora da base** → continua só notificando o Jurídico 
 8. Registrar o que foi feito (evitar re-tratar → estender o `store` com flag "tratado";
    e/ou lista Jurídico no SharePoint) e notificar o time.
 
-**Decisões a fechar com o usuário antes de codar:** caixa de e-mail de origem (Jurídico);
-template do e-mail; ferramenta/So do resumo; onde registrar o histórico; tabela de prazos por
-Tipo de Intimação (se for calcular vencimento em vez de só ler o do SEI).
+### Decisões travadas (2026-07-16)
+- **Ciência automática** na Etapa 1 (o bot abre e dá ciência sozinho p/ individual ativo).
+- **Envio de e-mail em 2 etapas:** Etapa 1 = **criar rascunho + notificar o Teams p/ validação**
+  (humano envia); Etapa 2 (depois) = envio direto via **fluxo Power Automate**.
+- **Remetente do Jurídico:** `juridico@scmengenharia.com.br`.
+- **Resumo:** LLM **OpenAI** (reaproveitar a chave do projeto de vistorias).
+- **Tudo reportado no Teams** (processo, o que foi feito, prazo, para quem foi o e-mail).
+
+### Achados da exploração (usando processos JÁ CUMPRIDOS — regra: só abrir Situação != Pendente)
+- **Página do processo** = `processo_acesso_externo_consulta.php?id_acesso_externo=<ID>&infra_hash=<sessão>`
+  (título "Acesso Externo com Disponibilização Parcial de Documentos"). Tem cabeçalho
+  (Processo, Tipo, Interessados), botões **Gerar PDF / Gerar ZIP / Peticionamento Intercorrente**,
+  e a **Lista de Protocolos** (documentos).
+- **Documentos**: cada linha tem link `documento_consulta_externa.php?id_acesso_externo=X&id_documento=Y&infra_hash=Z`
+  (`target=_blank`). O **ofício** é o doc cujo Tipo = "Ofício NNN"; **anexos** = demais docs
+  que **não** são "Certidão de Intimação Cumprida"; as **certidões** são a prova da ciência.
+  Baixar: por documento (essa URL) ou selecionar checkboxes → **Gerar ZIP**.
+- **Ícones de Ação** da linha do ofício são **lazy (JS)** — carregam após ~a página renderizar.
+  Num processo **já cumprido**: ícone "doc principal" (tooltip **"Cumprida em: DD/MM/AAAA"** =
+  data da ciência) + ícone "certidão". **O ícone azul de "Resposta" com o PRAZO NÃO aparece
+  em cumprido — é exclusivo de intimação PENDENTE.** Logo, a tela de Resposta/prazo só será
+  mapeada no **1º pendente real** (com cuidado).
+- **Estratégia do prazo/vencimento:** primário = tela **Resposta** (ícone azul, mapear no 1º
+  pendente); **fallback** = data da ciência ("Cumprida em") + prazo em dias extraído do **texto
+  do ofício** pelo LLM. Vencimento = ciência + prazo.
+- Fixtures reais (`processo_detalhe.*`, `oficio_doc.*`) são gitignored.
+
+### Progresso (branch `fase-2-tratativa-individual`)
+- ✅ **Increment 1**: `seibot/tratativa.py` (`selecionar_candidatos` — individual + ativo +
+  Pendente, puro/testável) + comando **`monitor tratar`** em **MODO ENSAIO** (só lista os
+  candidatos, NÃO abre nada). 6 testes (`test_tratativa.py`). 35 testes no total.
+- ⬜ Increment 2: módulo de resumo (OpenAI), testável isolado.
+- ⬜ Increment 3: abrir + capturar prazo + baixar ofício/anexos (testar no 1º pendente real).
+- ⬜ Increment 4: criar rascunho + notificação completa no Teams + registro "tratado".
+
+**Ainda a fechar com o usuário:** template do e-mail; onde registrar o histórico de tratados
+(store com flag "tratado" e/ou lista Jurídico no SharePoint); a chave OpenAI (de onde vem).
