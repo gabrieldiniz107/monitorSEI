@@ -31,6 +31,16 @@ class IntimacoesStore:
                 " data_expedicao TEXT,"
                 " visto_em TEXT DEFAULT CURRENT_TIMESTAMP)"
             )
+            # Fase 2: intimações já TRATADAS (rascunho criado) — para não repetir.
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS tratadas ("
+                " chave TEXT PRIMARY KEY,"
+                " processo TEXT,"
+                " doc_id TEXT,"
+                " cnpj TEXT,"
+                " data_limite TEXT,"
+                " tratado_em TEXT DEFAULT CURRENT_TIMESTAMP)"
+            )
             con.commit()
 
     def ja_visto(self, chave: str) -> bool:
@@ -69,3 +79,19 @@ class IntimacoesStore:
     def contar(self) -> int:
         with closing(sqlite3.connect(self._path)) as con:
             return con.execute("SELECT COUNT(*) FROM intimacoes").fetchone()[0]
+
+    # --- Fase 2: tratadas ---
+    def ja_tratado(self, chave: str) -> bool:
+        with closing(sqlite3.connect(self._path)) as con:
+            return con.execute(
+                "SELECT 1 FROM tratadas WHERE chave = ?", (chave,)
+            ).fetchone() is not None
+
+    def marcar_tratado(self, intim: Intimacao, data_limite: str = "") -> None:
+        with closing(sqlite3.connect(self._path)) as con:
+            con.execute(
+                "INSERT OR IGNORE INTO tratadas "
+                "(chave, processo, doc_id, cnpj, data_limite) VALUES (?, ?, ?, ?, ?)",
+                (intim.chave, intim.processo, intim.doc_id, intim.documento, data_limite),
+            )
+            con.commit()

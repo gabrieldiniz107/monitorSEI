@@ -61,6 +61,17 @@ def _parse_destinatario(texto: str) -> tuple[str, str, str]:
     return nome, normalizar_cnpj(doc_fmt), doc_fmt
 
 
+_CONSULTA_RE = re.compile(r"window\.open\('([^']*processo_acesso_externo_consulta[^']*)'\)")
+
+
+def _parse_consulta_url(row: str) -> str:
+    m = _CONSULTA_RE.search(row)
+    if not m:
+        return ""
+    url = _html.unescape(m.group(1))
+    return url if url.startswith("http") else "https://sei.anatel.gov.br/sei/" + url
+
+
 def _parse_linha(row: str) -> Intimacao:
     processo = _celula(row, "Processo")
     oficio_desc, doc_id = _parse_documento_principal(_celula(row, "Documento Principal"), row)
@@ -76,6 +87,8 @@ def _parse_linha(row: str) -> Intimacao:
         tipo_intimacao=_celula(row, "Tipo de Intimação"),
         data_expedicao=_celula(row, "Data de Expedição"),
         situacao=_celula(row, "Situação"),
+        id_acesso_externo=_attr(row, "data-idacext"),
+        consulta_url=_parse_consulta_url(row),
     )
 
 

@@ -101,6 +101,17 @@ def baixar(context, url: str) -> bytes:
     return r.body()
 
 
+def oficio_pdf(page, oficio_url: str) -> bytes:
+    """Renderiza a página do ofício (HTML) e devolve como PDF (Chromium headless).
+    ⚠️ page.pdf() só funciona em headless."""
+    try:
+        page.goto(_abs(oficio_url), wait_until="commit")
+    except Exception:
+        pass
+    page.wait_for_timeout(2000)
+    return page.pdf(format="A4", print_background=True)
+
+
 def url_peticionar_resposta(page) -> Optional[str]:
     """URL da página de resposta (onde está o prazo), a partir do ícone azul da linha do
     ofício. None se a intimação não exige resposta (ex.: mero Conhecimento)."""

@@ -199,11 +199,27 @@ Individual **não-ativo/fora da base** → continua só notificando o Jurídico 
 - ✅ **Increment 3 (core)**: `seibot/processo.py` — parsers puros `extrair_anexos` e
   `parse_prazo` (testados em texto real) + helpers `abrir_processo`, `mapa_protocolos`,
   `baixar`, `url_peticionar_resposta`, `capturar_prazo`. `test_processo.py`. **41 testes.**
-- ⬜ **Increment 2**: módulo de resumo (OpenAI — chave já no `.env`).
-- ⬜ **Increment 4**: orquestrar a tratativa (abrir → **dar ciência** → prazo → ofício/anexos →
-  resumo → **rascunho** e-mail Jurídico → notificar Teams → marcar "tratado"). Atrás de flag,
-  nunca no `run` de produção.
+- ✅ **Increment 2**: `seibot/resumo.py` — `resumir(oficio_texto, cfg, anexos, client)` via
+  OpenAI (`gpt-4o-mini`), cliente injetável (testes com fake). `limpar()` HTML→texto.
+  `test_resumo.py`. **44 testes.** Validado ao vivo com o Ofício 498 real (resumo preciso).
+- ✅ **Increment 4 (construído + ensaio-geral validado)**: orquestração `tratativa.tratar_um`
+  (abrir processo → capturar prazo → baixar ofício + anexos → PDF do ofício via `page.pdf()`
+  [só headless] → resumo LLM → montar e-mail → **criar rascunho** no Jurídico via Power Automate
+  → notificar Teams → marcar "tratado"). `seibot/rascunho.py` (montar assunto/corpo/mensagem
+  Graph + `criar_rascunho`), `store` ganhou tabela `tratadas`, `models`/`intimacoes` ganharam
+  `consulta_url`/`id_acesso_externo`. Comando **`monitor tratar --modo {ensaio|completo|real}`**:
+  - `ensaio` (default) = só lista candidatos; `completo --processo <nº>` = ensaio-geral num
+    processo **já cumprido** (roda tudo e cria rascunho de verdade, SEM ciência); `real` = dá
+    **ciência** de verdade (só pendentes; nunca no `run` de produção).
+  - **Ensaio-geral validado ao vivo (2026-07-16)** no Goncalves (cumprido): prazo 30/07/2026,
+    ofício PDF 163 KB, 2 anexos, rascunho criado no `juridico@` com os 4 e-mails da empresa,
+    Teams notificado. **51 testes.** POWERAUTOMATE_RASCUNHO_URL no `.env`.
 
-**A fechar com o usuário:** template do e-mail; ofício como PDF p/ anexar (via "Gerar PDF" do
-processo?) ou só anexos + resumo no corpo; onde registrar "tratado" (store SQLite e/ou lista
-Jurídico no SharePoint).
+### ⚠️ Ainda NÃO está pronto para produção (2026-07-16)
+- Faltam **ajustes** (texto/tom do e-mail, template, refinos — a definir com o usuário).
+- O **modo `real` (que DÁ CIÊNCIA)** ainda **não foi exercitado** — é mecanicamente igual ao
+  ensaio-geral, mas a única forma de testar de verdade é **esperar chegar uma intimação
+  individual PENDENTE** e abri-la passo a passo, com o usuário acompanhando (a ciência inicia
+  o prazo, é irreversível). **Aguardando um processo individual pendente para o teste real.**
+- A tela de "Resposta" (prazo) num PENDENTE ainda não foi vista — confirmar que o
+  `#selTipoResposta` aparece igual antes da ciência (deve, mas validar no 1º pendente).

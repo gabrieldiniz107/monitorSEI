@@ -113,28 +113,71 @@ def _cmd_dry_run(cfg: Config) -> dict:
     return {"status": "ok", "coletados": len(intims), "grupos": len(grupos), "novos": len(novos)}
 
 
-def _cmd_tratar(cfg: Config) -> dict:
-    """Fase 2 — MODO ENSAIO: só SELECIONA e lista os candidatos à tratativa
-    (individual + cliente ativo + Pendente). NÃO abre processo, NÃO dá ciência."""
-    from . import tratativa
-    from .login import fazer_login
+def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = None) -> dict:
+    """Fase 2 — tratativa individual, em 3 modos:
+    - ensaio (default): só LISTA candidatos (individual+ativo+Pendente). NÃO abre nada.
+    - completo <--processo P>: ENSAIO GERAL num processo JÁ CUMPRIDO (Situação != Pendente):
+      roda todo o pipeline e CRIA um rascunho de verdade, SEM dar ciência nova. Valida tudo.
+    - real: trata os PENDENTES de verdade → **DÁ CIÊNCIA** (inicia prazo). Cria rascunho.
+    """
+    from . import sessao, tratativa
     clientes = clientes_mod.carregar_clientes()
-    with fazer_login(cfg) as sess:
+    store = IntimacoesStore(cfg.seen_db_path)
+
+    with sessao.abrir(cfg, permitir_login=True) as sess:
         intims = intimacoes.coletar(sess.page, cfg, paginas=cfg.run_paginas)
-    grupos = classificar.agrupar_por_oficio(intims)
-    candidatos = tratativa.selecionar_candidatos(grupos, clientes)
-    print(f"\n===== TRATAR (ENSAIO): {len(candidatos)} candidato(s) — NADA foi aberto =====")
-    for g in candidatos:
-        i = g.destinatarios[0]
-        print(f"  • {g.processo} | {g.oficio_desc} ({g.doc_id}) | {i.destinatario} — "
-              f"{i.documento_fmt} | {g.tipo_intimacao} | {g.situacao}")
-    return {"status": "ok", "modo": "ensaio", "coletados": len(intims),
-            "candidatos": len(candidatos)}
+        grupos = classificar.agrupar_por_oficio(intims)
+
+        if modo == "ensaio":
+            candidatos = tratativa.selecionar_candidatos(grupos, clientes)
+            print(f"\n===== TRATAR (ENSAIO): {len(candidatos)} candidato(s) — NADA foi aberto =====")
+            for g in candidatos:
+                i = g.destinatarios[0]
+                print(f"  • {g.processo} | {g.oficio_desc} ({g.doc_id}) | {i.destinatario} — "
+                      f"{i.documento_fmt} | {g.tipo_intimacao}")
+            return {"status": "ok", "modo": "ensaio", "coletados": len(intims),
+                    "candidatos": len(candidatos)}
+
+        if modo == "completo":
+            if not processo_alvo:
+                return {"status": "erro", "erro": "modo completo exige --processo <nº>."}
+            g = next((x for x in grupos if x.processo == processo_alvo and x.tipo == "individual"), None)
+            if g is None:
+                return {"status": "erro", "erro": f"processo individual {processo_alvo} não achado na página."}
+            if g.situacao == "Pendente":
+                return {"status": "erro",
+                        "erro": "ABORTADO: processo Pendente — o ensaio-completo só roda em já cumprido (não dar ciência)."}
+            print(f"\n===== TRATAR (ENSAIO-COMPLETO) em {processo_alvo} (Situação: {g.situacao}) =====")
+            r = tratativa.tratar_um(sess, cfg, g, clientes, store,
+                                    criar_rascunho=True, url_teams=cfg.teams_webhook_url or None)
+            return {"status": "ok", "modo": "completo", **r}
+
+        if modo == "real":
+            candidatos = [g for g in tratativa.selecionar_candidatos(grupos, clientes)
+                          if not store.ja_tratado(g.destinatarios[0].chave)]
+            print(f"\n===== TRATAR (REAL — DÁ CIÊNCIA): {len(candidatos)} candidato(s) =====")
+            tratados, falhas = 0, 0
+            for g in candidatos:
+                try:
+                    tratativa.tratar_um(sess, cfg, g, clientes, store,
+                                        criar_rascunho=True, url_teams=cfg.teams_webhook_url or None)
+                    tratados += 1
+                except Exception as e:
+                    falhas += 1
+                    print(f"  erro ao tratar {g.processo}: {e}")
+            return {"status": "ok" if falhas == 0 else "parcial", "modo": "real",
+                    "candidatos": len(candidatos), "tratados": tratados, "falhas": falhas}
+
+    return {"status": "erro", "erro": f"modo inválido: {modo}"}
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="seibot.monitor", description="Monitor de Intimações SEI")
     parser.add_argument("comando", choices=["run", "baseline", "dry-run", "tratar"])
+    parser.add_argument("--modo", choices=["ensaio", "completo", "real"], default="ensaio",
+                        help="modo do 'tratar' (default: ensaio)")
+    parser.add_argument("--processo", default=None,
+                        help="nº do processo (para 'tratar --modo completo')")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -143,7 +186,7 @@ def main(argv=None) -> int:
     elif args.comando == "baseline":
         res = _cmd_baseline(cfg)
     elif args.comando == "tratar":
-        res = _cmd_tratar(cfg)
+        res = _cmd_tratar(cfg, args.modo, args.processo)
     else:
         res = _cmd_dry_run(cfg)
 

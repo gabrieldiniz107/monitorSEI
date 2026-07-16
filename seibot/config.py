@@ -63,6 +63,9 @@ class Config:
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
+    # Power Automate — criação de rascunho na caixa do Jurídico (Fase 2, Increment 4)
+    powerautomate_rascunho_url: str = os.getenv("POWERAUTOMATE_RASCUNHO_URL", "").strip()
+
     def validate(self) -> None:
         faltando = [
             nome
