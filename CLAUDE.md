@@ -174,13 +174,36 @@ Individual **não-ativo/fora da base** → continua só notificando o Jurídico 
   do ofício** pelo LLM. Vencimento = ciência + prazo.
 - Fixtures reais (`processo_detalhe.*`, `oficio_doc.*`) são gitignored.
 
-### Progresso (branch `fase-2-tratativa-individual`)
-- ✅ **Increment 1**: `seibot/tratativa.py` (`selecionar_candidatos` — individual + ativo +
-  Pendente, puro/testável) + comando **`monitor tratar`** em **MODO ENSAIO** (só lista os
-  candidatos, NÃO abre nada). 6 testes (`test_tratativa.py`). 35 testes no total.
-- ⬜ Increment 2: módulo de resumo (OpenAI), testável isolado.
-- ⬜ Increment 3: abrir + capturar prazo + baixar ofício/anexos (testar no 1º pendente real).
-- ⬜ Increment 4: criar rascunho + notificação completa no Teams + registro "tratado".
+### Mecânica da tratativa — VALIDADA ao vivo (2026-07-16, em processos já cumpridos)
+- **Reaproveitamento de sessão** (`seibot/sessao.py`): `abrir(cfg, permitir_login)` reusa os
+  cookies salvos enquanto a sessão do SEI está viva (evita 2FA a cada passo). Só p/ dev/
+  multi-passos; produção continua com login novo por execução. (SEI expira a sessão rápido,
+  ~poucos min; o reuso cross-processo raramente pega — o ganho é 1 login por script.)
+- **Prazo/vencimento**: na linha do ofício, o ícone `intimacao_peticionar_resposta` (só existe
+  se a intimação exige resposta e ainda não foi respondida — some no "mero Conhecimento") leva
+  via `window.location` à página `acao=md_pet_responder_intimacao_usu_ext`. Lá, o `<select>`
+  **`#selTipoResposta`** tem a opção `"<Tipo> (<N> Dias) - Data Limite: DD/MM/AAAA"`
+  (ex. real Goncalves: **"Defesa Preliminar (15 Dias) - Data Limite: 30/07/2026"**). É um
+  FORMULÁRIO de peticionamento — **só ler o select, nunca preencher/enviar**.
+- **Ofício**: `documento_consulta_externa.php?...&id_documento=X` → HTML (ISO-8859-1); é o texto
+  p/ o resumo.
+- **Anexos**: citados NO TEXTO do ofício como `"(SEI nº NNNNNN)"` (com entidades HTML:
+  `&ordm;`/`&nbsp;` → precisa `html.unescape`). Casam com o nº visível na Lista de Protocolos;
+  baixa-se o **PDF** via `context.request.get(url).body()` (validado: Ata 460KB, Manual 231KB).
+  Ofício sem `(SEI nº …)` ⇒ sem anexos.
 
-**Ainda a fechar com o usuário:** template do e-mail; onde registrar o histórico de tratados
-(store com flag "tratado" e/ou lista Jurídico no SharePoint); a chave OpenAI (de onde vem).
+### Progresso (branch `fase-2-tratativa-individual`)
+- ✅ **Increment 1**: `seibot/tratativa.py` (`selecionar_candidatos`) + comando `monitor tratar`
+  em MODO ENSAIO (só lista, não abre). `test_tratativa.py`.
+- ✅ **Sessão**: `seibot/sessao.py` (reaproveitamento).
+- ✅ **Increment 3 (core)**: `seibot/processo.py` — parsers puros `extrair_anexos` e
+  `parse_prazo` (testados em texto real) + helpers `abrir_processo`, `mapa_protocolos`,
+  `baixar`, `url_peticionar_resposta`, `capturar_prazo`. `test_processo.py`. **41 testes.**
+- ⬜ **Increment 2**: módulo de resumo (OpenAI — chave já no `.env`).
+- ⬜ **Increment 4**: orquestrar a tratativa (abrir → **dar ciência** → prazo → ofício/anexos →
+  resumo → **rascunho** e-mail Jurídico → notificar Teams → marcar "tratado"). Atrás de flag,
+  nunca no `run` de produção.
+
+**A fechar com o usuário:** template do e-mail; ofício como PDF p/ anexar (via "Gerar PDF" do
+processo?) ou só anexos + resumo no corpo; onde registrar "tratado" (store SQLite e/ou lista
+Jurídico no SharePoint).
