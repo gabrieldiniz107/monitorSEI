@@ -59,6 +59,10 @@ class Config:
     graph_client_id: str = os.getenv("GRAPH_CLIENT_ID", "").strip()
     graph_client_secret: str = os.getenv("GRAPH_CLIENT_SECRET", "").strip()
 
+    # OpenAI (Fase 2 — resumo do ofício/anexos)
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+
     def validate(self) -> None:
         faltando = [
             nome
