@@ -1,0 +1,13 @@
+# Execução efêmera (não é daemon): o cron do host dispara
+#   docker compose run --rm sei-monitor python -m seibot.monitor run
+# às 07/11/14/17h. Só faz conexões de saída (SEI, IMAP, webhook Teams).
+services:
+  sei-monitor:
+    build: .
+    image: sei-monitor
+    env_file: .env
+    environment:
+      - TZ=America/Sao_Paulo
+    volumes:
+      - ./state:/app/state   # persiste intimacoes.db (dedup) + sei_state.json
+    restart: "no"
