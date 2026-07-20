@@ -18,6 +18,19 @@ from .models import Grupo, Intimacao
 SITUACAO_PENDENTE = "Pendente"
 
 
+class TratativaIncompleta(RuntimeError):
+    """Falha DEPOIS que a ciência já foi dada.
+
+    Estado perigoso: o prazo legal já está correndo, o checkpoint no store impede o retry
+    automático, e o cliente ainda NÃO recebeu o rascunho. Exige ação humana — por isso o
+    chamador notifica como CRÍTICO.
+    """
+
+    def __init__(self, msg: str, *, processo: str, empresa: str, prazo: str = ""):
+        super().__init__(msg)
+        self.processo, self.empresa, self.prazo = processo, empresa, prazo
+
+
 def _nome_arquivo(base: str, num: str) -> str:
     s = re.sub(r"[^\w]+", "_", f"{base}_{num}", flags=re.U).strip("_")
     return (s or f"doc_{num}") + ".pdf"
@@ -64,6 +77,7 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
 
     processo.abrir_processo(page, intim.consulta_url)
 
+    ciencia_dada = False
     aceites = processo.urls_aceite(page)
     if aceites:
         if not dar_ciencia:
@@ -73,10 +87,32 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
         alvo = next((a for a in aceites if a["principal"]), aceites[0])
         log(f"   ⚠️ DANDO CIÊNCIA (doc {alvo['num']}) — inicia o prazo…")
         processo.dar_ciencia(page, alvo["url"])
+        ciencia_dada = True
         store.marcar_tratado(intim, "")   # checkpoint: ciência dada, prazo já corre
         processo.abrir_processo(page, intim.consulta_url)  # recarrega já com os links vivos
         log("   ✓ ciência confirmada")
 
+    try:
+        return _tratar_apos_ciencia(sess, cfg, grupo, intim, clientes, store,
+                                    criar_rascunho=criar_rascunho, url_teams=url_teams, log=log)
+    except Exception as e:
+        if not ciencia_dada:
+            raise
+        # ciência já dada: o prazo corre, o checkpoint bloqueia retry e o cliente não foi
+        # avisado. Vira erro CRÍTICO para alguém agir à mão.
+        raise TratativaIncompleta(str(e), processo=grupo.processo,
+                                  empresa=intim.destinatario) from e
+
+
+def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
+                         clientes: Optional[BaseClientes], store, *,
+                         criar_rascunho: bool, url_teams: Optional[str], log) -> dict:
+    """Da Lista de Protocolos até o rascunho. Separado para que qualquer falha aqui seja
+    classificada como pós-ciência pelo `tratar_um`."""
+    from . import processo, rascunho, resumo
+    from .teams import enviar_teams_webhook
+
+    page, ctx = sess.page, sess.context
     protos = processo.mapa_protocolos(page)
     if not protos:
         raise RuntimeError("Lista de Protocolos vazia mesmo após a ciência — abortado.")

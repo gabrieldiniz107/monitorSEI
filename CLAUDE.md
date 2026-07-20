@@ -263,12 +263,37 @@ o registro não se perde) e **salvaguarda**: se houver ícone de aceite e `dar_c
 aborta sem tocar em nada. `ensaio`/`completo` passam `dar_ciencia=False`; só `real` passa True.
 **57 testes.**
 
-### ⚠️ Ainda NÃO está pronto para produção
-- Faltam **ajustes de texto/tom do e-mail** ao cliente (template em `rascunho.py` — a definir).
-- O **`tratar --modo real`** (que dá ciência sozinho, sem `--processo`) ainda não foi rodado
-  ponta a ponta: no pendente real fizemos a ciência por script de mapeamento e depois o
-  pipeline via `--modo completo`. O caminho está construído e testado, mas o comando em si
-  espera o próximo pendente.
-- **Nada agenda a Fase 2**: o cron da VPS só roda `run`. Falta decidir cadência do `tratar`.
+### Fase 2 automática — decisão do usuário (2026-07-20)
+
+Rodar **tudo automático** no cron, com **alerta de erro no Teams do responsável técnico**.
+Implementado:
+
+- **`seibot/erros.py`** — `notificar_erro(cfg, contexto, exc, critico=)`. Manda traceback ao
+  `TEAMS_WEBHOOK_ERROS_URL` (fallback: webhook do grupo). **Nunca levanta** — falhar ao avisar
+  não pode virar uma segunda falha. Trunca traceback em 2500 chars, escapa HTML.
+- **`monitor.main()`** tem `try/except` global: **qualquer** exceção, mapeada ou não, em
+  qualquer comando, vira alerta. `run` também alerta falha por ofício.
+- **`TRATAR_AUTO`** (novo, default `false`): trava que arma o `--modo real`. Verificada
+  **antes do login** (não gasta 2FA). Falha ALTO com mensagem — nunca no-op silencioso.
+- **`TratativaIncompleta`** (novo): exceção para falha **depois** da ciência. Estado perigoso —
+  prazo correndo + checkpoint bloqueando retry + cliente não avisado ⇒ alerta **🆘 CRÍTICO**
+  pedindo ação manual. `tratar_um` separou `_tratar_apos_ciencia()` só para classificar isso.
+- **Cron**: `run` em 07/11/14/17h e `tratar --modo real` 10 min depois (não concorrer na sessão).
+
+**66 testes.**
+
+### ⚠️ Riscos conhecidos ao ligar (leia antes de armar `TRATAR_AUTO=true`)
+- **`processo.dar_ciencia()` nunca executou.** No pendente real a ciência foi dada pelo script
+  de mapeamento (`ciencia.py`, descartável), não por essa função. Ela reproduz exatamente o
+  que funcionou (mesma URL de modal, mesmo `#sbmAceitarIntimacao`, com guarda se o botão
+  sumir), mas o **primeiro uso em produção é o primeiro uso real do código**. O `--modo
+  completo` **não** cobre isso: ele passa `dar_ciencia=False` por construção.
+- **`--modo real` como comando também nunca rodou** ponta a ponta (o laço de seleção +
+  ciência). Só suas partes.
+- **Falha pós-ciência não tem retry** — por design (evita ciência dupla). Depende de humano
+  reagir ao alerta crítico.
+- **`TEAMS_WEBHOOK_ERROS_URL` ainda não existe** — precisa criar o fluxo no Power Automate
+  apontando para o Teams do Gabriel. Enquanto vazio, erro cai no grupo.
+- Faltam **ajustes de texto/tom do e-mail** ao cliente (template em `rascunho.py`).
 - Cliente Cabos Brasil Europa tem **só 1 e-mail** no SharePoint (`julia.castro@ella.link`) —
   conferir se o cadastro está completo.

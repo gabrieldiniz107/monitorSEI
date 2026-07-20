@@ -66,6 +66,14 @@ class Config:
     # Power Automate — criação de rascunho na caixa do Jurídico (Fase 2, Increment 4)
     powerautomate_rascunho_url: str = os.getenv("POWERAUTOMATE_RASCUNHO_URL", "").strip()
 
+    # Teams do responsável técnico — para onde vão os ERROS (qualquer passo, mapeado ou não).
+    # Vazio ⇒ cai no webhook do grupo (TEAMS_WEBHOOK_INTIMACOES_URL).
+    teams_webhook_erros_url: str = os.getenv("TEAMS_WEBHOOK_ERROS_URL", "").strip()
+
+    # Fase 2 automática: se True, o `tratar --modo real` pode rodar pelo cron dando
+    # ciência sozinho. Desligado por padrão — ciência é irreversível.
+    tratar_auto: bool = _bool("TRATAR_AUTO", False)
+
     def validate(self) -> None:
         faltando = [
             nome

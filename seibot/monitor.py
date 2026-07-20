@@ -13,10 +13,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import traceback
 from datetime import date, datetime
 from typing import Callable
 
-from . import classificar, clientes as clientes_mod, intimacoes, notify
+from . import classificar, clientes as clientes_mod, erros, intimacoes, notify
 from .config import Config, load_config
 from .models import Grupo
 from .store import IntimacoesStore
@@ -64,6 +65,9 @@ def executar(
         except Exception as e:  # não marca → retry no próximo ciclo
             falhas += 1
             log(f"  erro ao notificar ofício {g.doc_id}: {e}")
+            erros.notificar_erro(cfg, f"run · notificar ofício {g.doc_id}", e, log=log,
+                                 detalhe=f"<b>Processo:</b> {g.processo}<br>"
+                                         "Não marcado como visto; retenta no próximo ciclo.")
             continue
         for i in g.destinatarios:
             store.marcar_visto(i, g.tipo)
@@ -121,6 +125,16 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
     - real: trata os PENDENTES de verdade → **DÁ CIÊNCIA** (inicia prazo). Cria rascunho.
     """
     from . import sessao, tratativa
+
+    # trava deliberada, verificada ANTES do login (não gasta 2FA para descobrir que está
+    # desarmada): dar ciência sozinho exige TRATAR_AUTO=true. Falha ALTO, nunca silencioso.
+    if modo == "real" and not cfg.tratar_auto:
+        return {"status": "erro", "modo": "real",
+                "erro": "TRATAR_AUTO=false no .env — o modo real dá CIÊNCIA (inicia prazo "
+                        "legal) e está desarmado. Ligue TRATAR_AUTO=true para armar."}
+    if modo == "completo" and not processo_alvo:
+        return {"status": "erro", "erro": "modo completo exige --processo <nº>."}
+
     clientes = clientes_mod.carregar_clientes()
     store = IntimacoesStore(cfg.seen_db_path)
 
@@ -139,8 +153,6 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
                     "candidatos": len(candidatos)}
 
         if modo == "completo":
-            if not processo_alvo:
-                return {"status": "erro", "erro": "modo completo exige --processo <nº>."}
             g = next((x for x in grupos if x.processo == processo_alvo and x.tipo == "individual"), None)
             if g is None:
                 return {"status": "erro", "erro": f"processo individual {processo_alvo} não achado na página."}
@@ -157,18 +169,36 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
             candidatos = [g for g in tratativa.selecionar_candidatos(grupos, clientes)
                           if not store.ja_tratado(g.destinatarios[0].chave)]
             print(f"\n===== TRATAR (REAL — DÁ CIÊNCIA): {len(candidatos)} candidato(s) =====")
-            tratados, falhas = 0, 0
+            tratados, falhas, criticas = 0, 0, 0
             for g in candidatos:
                 try:
                     tratativa.tratar_um(sess, cfg, g, clientes, store, criar_rascunho=True,
                                         dar_ciencia=True,  # modo real: DÁ CIÊNCIA
                                         url_teams=cfg.teams_webhook_url or None)
                     tratados += 1
-                except Exception as e:
+                except tratativa.TratativaIncompleta as e:
+                    # ciência JÁ dada: prazo correndo, sem retry automático, cliente não avisado
+                    criticas += 1
+                    falhas += 1
+                    print(f"  ERRO CRÍTICO em {g.processo}: {e}")
+                    erros.notificar_erro(
+                        cfg, f"tratar --modo real · {g.processo}", e, critico=True,
+                        detalhe=(f"<b>Empresa:</b> {e.empresa}<br>"
+                                 f"<b>Ofício:</b> {g.oficio_desc} ({g.doc_id})<br>"
+                                 "⚠️ <b>A CIÊNCIA JÁ FOI DADA — o prazo está correndo.</b><br>"
+                                 "O bot não vai tentar de novo (checkpoint no store) e o cliente "
+                                 "<b>não recebeu</b> o rascunho. Tratar à mão."))
+                except Exception as e:  # noqa: BLE001 — qualquer falha, mapeada ou não
                     falhas += 1
                     print(f"  erro ao tratar {g.processo}: {e}")
+                    erros.notificar_erro(
+                        cfg, f"tratar --modo real · {g.processo}", e,
+                        detalhe=(f"<b>Empresa:</b> {g.destinatarios[0].destinatario}<br>"
+                                 f"<b>Ofício:</b> {g.oficio_desc} ({g.doc_id})<br>"
+                                 "Ciência NÃO foi dada; será retentado no próximo ciclo."))
             return {"status": "ok" if falhas == 0 else "parcial", "modo": "real",
-                    "candidatos": len(candidatos), "tratados": tratados, "falhas": falhas}
+                    "candidatos": len(candidatos), "tratados": tratados,
+                    "falhas": falhas, "criticas": criticas}
 
     return {"status": "erro", "erro": f"modo inválido: {modo}"}
 
@@ -182,17 +212,38 @@ def main(argv=None) -> int:
                         help="nº do processo (para 'tratar --modo completo')")
     args = parser.parse_args(argv)
 
-    cfg = load_config()
-    if args.comando == "run":
-        res = _cmd_run(cfg)
-    elif args.comando == "baseline":
-        res = _cmd_baseline(cfg)
-    elif args.comando == "tratar":
-        res = _cmd_tratar(cfg, args.modo, args.processo)
-    else:
-        res = _cmd_dry_run(cfg)
+    # o load_config pode falhar (.env incompleto) antes de existir cfg p/ notificar
+    try:
+        cfg = load_config()
+    except Exception as e:  # noqa: BLE001
+        print(json.dumps({"status": "erro", "erro": f"config: {e}"}, ensure_ascii=False))
+        return 1
+
+    # Rede de segurança: QUALQUER exceção não tratada, em qualquer passo, vira alerta no
+    # Teams do responsável técnico. Sem isso uma falha no cron morre silenciosa no log.
+    try:
+        if args.comando == "run":
+            res = _cmd_run(cfg)
+        elif args.comando == "baseline":
+            res = _cmd_baseline(cfg)
+        elif args.comando == "tratar":
+            res = _cmd_tratar(cfg, args.modo, args.processo)
+        else:
+            res = _cmd_dry_run(cfg)
+    except Exception as e:  # noqa: BLE001 — inclusive erros não mapeados
+        ctx = f"monitor {args.comando}"
+        if args.comando == "tratar":
+            ctx += f" --modo {args.modo}"
+        erros.notificar_erro(cfg, ctx, e)
+        print(json.dumps({"status": "erro", "comando": args.comando,
+                          "erro": f"{type(e).__name__}: {e}"}, ensure_ascii=False), flush=True)
+        traceback.print_exc()
+        return 1
 
     print(json.dumps(res, ensure_ascii=False), flush=True)
+    if res.get("status") == "erro":
+        erros.notificar_erro(cfg, f"monitor {args.comando}",
+                             RuntimeError(res.get("erro", "falha sem detalhe")))
     return 0 if res.get("status") in ("ok", "parcial") else 1
 
 

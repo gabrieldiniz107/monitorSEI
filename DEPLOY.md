@@ -38,13 +38,48 @@ docker compose run --rm sei-monitor python -m seibot.monitor baseline
 `crontab -e`:
 ```cron
 CRON_TZ=America/Sao_Paulo
-0 7,11,14,17 * * * cd /caminho/SCM-Juridico/monitoramento-sei && docker compose run --rm sei-monitor python -m seibot.monitor run >> /var/log/sei-monitor.log 2>&1
+# Fase 1 — monitorar e notificar (somente leitura)
+0 7,11,14,17 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor run >> /var/log/sei-monitor.log 2>&1
+# Fase 2 — tratativa individual (DÁ CIÊNCIA). 10 min após o run, para não concorrer na sessão.
+10 7,11,14,17 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor tratar --modo real >> /var/log/sei-tratativa.log 2>&1
 ```
 (Se precisou de xvfb: `... run --rm sei-monitor xvfb-run -a python -m seibot.monitor run ...`)
+
+## 5. ⚠️ Armar a Fase 2 (ciência automática)
+
+O `tratar --modo real` **dá ciência sozinho**, o que **inicia prazo legal e é irreversível**.
+Por isso ele só roda com duas coisas configuradas no `.env`:
+
+```bash
+TEAMS_WEBHOOK_ERROS_URL=<webhook do Teams do responsável técnico>
+TRATAR_AUTO=true
+```
+
+Sem `TRATAR_AUTO=true` o comando recusa rodar (falha alto, com mensagem — não é no-op
+silencioso). **Deixe `false` até o webhook de erros estar funcionando**, senão uma falha no
+meio da tratativa fica sem ninguém sabendo — e o caso pior é justamente esse (ver abaixo).
+
+### Falha depois da ciência = ação manual
+Se o pipeline quebrar **após** a ciência (ex.: OpenAI fora do ar, Power Automate recusando),
+o estado é: prazo correndo, cliente **não** avisado, e o checkpoint no `store` **impede o
+retry automático** (para não dar ciência duas vezes). Isso vira um alerta
+**🆘 ERRO CRÍTICO** no Teams, com processo/empresa/ofício — quem receber precisa concluir a
+tratativa à mão. Não ignorar esse alerta.
+
+### Quem recebe o quê
+| Destino | Conteúdo |
+|---|---|
+| Grupo "monitor sei juridico" | intimações novas (Fase 1) + resumo de cada tratativa (Fase 2) |
+| `TEAMS_WEBHOOK_ERROS_URL` | **qualquer** exceção, mapeada ou não, com traceback |
 
 ## Comandos úteis
 - `python -m seibot.monitor dry-run` — mostra o que seria notificado, sem tocar banco/Teams.
 - `python -m seibot.monitor run` — detecta e notifica.
 - `python -m seibot.monitor baseline` — marca recentes como vistos, sem notificar.
+- `python -m seibot.monitor tratar --modo ensaio` — lista candidatos à tratativa, sem abrir nada.
+- `python -m seibot.monitor tratar --modo completo --processo <nº>` — ensaio-geral num processo
+  **já cumprido**: roda tudo e cria rascunho de verdade, **sem** dar ciência.
+- `python -m seibot.monitor tratar --modo real` — produção da Fase 2 (**DÁ CIÊNCIA**).
 
-O `state/` (volume) guarda `intimacoes.db` (dedup) e `sei_state.json`. Não versionar.
+O `state/` (volume) guarda `intimacoes.db` (dedup + tabela `tratadas`) e `sei_state.json`.
+Não versionar.
