@@ -66,6 +66,20 @@ class Config:
     # Power Automate — criação de rascunho na caixa do Jurídico (Fase 2, Increment 4)
     powerautomate_rascunho_url: str = os.getenv("POWERAUTOMATE_RASCUNHO_URL", "").strip()
 
+    # --- Erros: DM no Teams do responsável técnico (Graph delegado, igual às vistorias) ---
+    # Destino dos ERROS (qualquer passo, mapeado ou não). Exige login device-code uma vez
+    # (`python -m seibot.teams_dm --login`) — chat no Graph não funciona app-only.
+    teams_dev_email: str = os.getenv("TEAMS_DEV_EMAIL", "").strip()
+    graph_token_cache: str = os.getenv("GRAPH_TOKEN_CACHE", "state/.graph_token.json").strip()
+    teams_chat_cache: str = os.getenv("TEAMS_CHAT_CACHE", "state/.teams_chats.json").strip()
+    # Webhook alternativo p/ erros (se preferir Power Automate em vez da DM via Graph).
+    # Só é usado quando TEAMS_DEV_EMAIL está vazio.
+    teams_webhook_erros_url: str = os.getenv("TEAMS_WEBHOOK_ERROS_URL", "").strip()
+
+    # Fase 2 automática: se True, o `tratar --modo real` pode rodar pelo cron dando
+    # ciência sozinho. Desligado por padrão — ciência é irreversível.
+    tratar_auto: bool = _bool("TRATAR_AUTO", False)
+
     def validate(self) -> None:
         faltando = [
             nome

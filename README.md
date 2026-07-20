@@ -7,8 +7,13 @@ Loga na conta única do Rodrigo (procurador de todos os provedores), **captura o
 código 2FA** por e-mail (IMAP, somente leitura) e lê a tela de **Intimações Eletrônicas**
 para detectar processos/ofícios/intimações e prazos.
 
-> ⚠️ **Regra de ouro:** o bot **NUNCA** clica em cadeado/ação que dê ciência — isso
-> iniciaria o prazo do processo. Ele só **lê** as listagens.
+> ⚠️ **Regra de ouro (Fase 1):** o monitoramento só **lê** as listagens, nunca dá ciência.
+> A **Fase 2** dá ciência de propósito, mas só para intimação individual de cliente ATIVO e
+> atrás de comando separado (`tratar --modo real` + `TRATAR_AUTO=true`).
+>
+> Detalhe que corrige um mal-entendido antigo: **abrir o processo NÃO dá ciência**. A ciência
+> é um passo explícito — o modal `confirmar_aceite` + botão `#sbmAceitarIntimacao`. Só esse
+> clique inicia o prazo.
 
 ## Estrutura
 ```
@@ -24,7 +29,14 @@ monitoramento-sei/
 │   ├── notify.py       # formata + envia p/ Teams
 │   ├── teams.py        # webhook (Power Automate/Workflows)
 │   ├── clientes.py     # (Fase 1b) base de clientes SharePoint por CNPJ
-│   └── monitor.py      # orquestrador + CLI (run/baseline/dry-run)
+│   ├── sessao.py       # (Fase 2) reaproveita cookies p/ não relogar a cada passo
+│   ├── processo.py     # (Fase 2) abrir processo, DAR CIÊNCIA, prazo, ofício/anexos
+│   ├── resumo.py       # (Fase 2) resumo do ofício via OpenAI
+│   ├── rascunho.py     # (Fase 2) monta e cria o rascunho de e-mail no Jurídico
+│   ├── tratativa.py    # (Fase 2) seleção de candidatos + orquestração da tratativa
+│   ├── erros.py        # alerta de QUALQUER falha na DM do responsável técnico
+│   ├── teams_dm.py     # DM no Teams via Graph delegado (device-code)
+│   └── monitor.py      # orquestrador + CLI (run/baseline/dry-run/tratar)
 ├── validar_login.py    # milestone 1: valida só o login
 ├── capturar_html.py    # util: salva o HTML da tela p/ calibrar o parser
 ├── tests/              # pytest (parser, classificar, store, notify, monitor)
@@ -52,6 +64,31 @@ cada empresa é cruzada por CNPJ com o SharePoint "Gestão Integrada" (`seibot/c
 união: `StatusContrato=Ativo` na lista *Clientes SCM* OU contrato *Ativo* na lista
 *Comercial*), **não-ativo** (com o status), ou **fora da base**; e a **adimplência**
 (lista *Financeiro*). Sem `GRAPH_*`, o bot segue só com a Fase 1a.
+
+## Comandos (Fase 2 — tratativa individual)
+```bash
+python -m seibot.monitor tratar --modo ensaio                  # só lista candidatos
+python -m seibot.monitor tratar --modo completo --processo NNN # ensaio-geral (sem ciência)
+python -m seibot.monitor tratar --modo real                    # produção — DÁ CIÊNCIA
+```
+Para cada intimação **nova + individual + cliente ATIVO + Pendente**: abre o processo,
+**dá ciência**, lê o prazo, baixa ofício e anexos, resume com LLM, e cria um **rascunho** de
+e-mail ao cliente na caixa do Jurídico (humano revisa e envia). Reporta tudo no Teams.
+
+`--modo real` exige `TRATAR_AUTO=true` no `.env` — trava deliberada, verificada antes do
+login. **Anexos vêm da Lista de Protocolos**, não do texto do ofício (o ofício nem sempre
+cita todos).
+
+## Erros
+Qualquer exceção, mapeada ou não, vira **DM no Teams** do `TEAMS_DEV_EMAIL` (Graph delegado,
+mesmo padrão do `automacaoVistorias`). Nunca vai para o grupo do Jurídico. Login único:
+```bash
+python -m seibot.teams_dm --login    # device-code, uma vez
+python -m seibot.teams_dm --teste "ping"
+python -m seibot.teams_dm --token    # confere escopos (o refresh token expira!)
+```
+Falha **depois** da ciência é marcada como **🆘 crítica**: o prazo já corre, não há retry
+automático (checkpoint no store) e o cliente não foi avisado — exige ação manual.
 
 ## Por que Playwright (e não requests)
 A tela de login carrega **Cloudflare Turnstile**, que passa invisível num navegador real

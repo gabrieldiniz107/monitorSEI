@@ -1,4 +1,8 @@
 """Testes da seleção de candidatos à tratativa (Fase 2)."""
+import pytest
+
+from seibot import processo as processo_mod
+from seibot import tratativa
 from seibot.classificar import agrupar_por_oficio
 from seibot.clientes import ClienteInfo
 from seibot.models import Intimacao
@@ -70,3 +74,66 @@ def test_fora_da_base_nao_eh_candidato():
 def test_sem_sharepoint_nao_seleciona():
     g = agrupar_por_oficio([_intim("10", "111")])
     assert selecionar_candidatos(g, None) == []
+
+
+# ---------------------------------------------------------------------------
+# Salvaguarda: intimação ainda PENDENTE (ícone de aceite presente) + dar_ciencia=False
+# ⇒ aborta ANTES de tocar em qualquer coisa. Protege o modo 'ensaio' e o 'completo'.
+# ---------------------------------------------------------------------------
+class _Sess:
+    page = object()
+    context = object()
+
+
+def test_pendente_sem_autorizacao_aborta_sem_dar_ciencia(monkeypatch):
+    chamou = []
+    monkeypatch.setattr(processo_mod, "abrir_processo", lambda *a, **k: None)
+    monkeypatch.setattr(processo_mod, "urls_aceite",
+                        lambda page: [{"url": "u", "num": "1", "principal": True}])
+    monkeypatch.setattr(processo_mod, "dar_ciencia",
+                        lambda *a, **k: chamou.append("ciencia"))
+
+    g = agrupar_por_oficio([_intim("10", "111")])[0]
+    with pytest.raises(RuntimeError, match="PENDENTE"):
+        tratativa.tratar_um(_Sess(), object(), g, _Clientes({"111": _ativo("111")}),
+                            store=None, criar_rascunho=False, dar_ciencia=False, log=lambda *a: None)
+    assert chamou == []  # não deu ciência
+
+
+def test_falha_apos_ciencia_vira_TratativaIncompleta(monkeypatch):
+    """Se quebrar DEPOIS da ciência, o erro tem que carregar esse estado (prazo correndo,
+    sem retry, cliente não avisado) para virar alerta CRÍTICO."""
+    monkeypatch.setattr(processo_mod, "abrir_processo", lambda *a, **k: None)
+    monkeypatch.setattr(processo_mod, "urls_aceite",
+                        lambda page: [{"url": "u", "num": "1", "principal": True}])
+    monkeypatch.setattr(processo_mod, "dar_ciencia", lambda *a, **k: None)
+    monkeypatch.setattr(processo_mod, "mapa_protocolos", lambda page: {})  # falha pós-ciência
+
+    class _Store:
+        marcou = []
+
+        def marcar_tratado(self, intim, data_limite=""):
+            self.marcou.append(intim.chave)
+
+    store = _Store()
+    g = agrupar_por_oficio([_intim("10", "111")])[0]
+    with pytest.raises(tratativa.TratativaIncompleta) as ei:
+        tratativa.tratar_um(_Sess(), object(), g, _Clientes({"111": _ativo("111")}),
+                            store, criar_rascunho=False, dar_ciencia=True, log=lambda *a: None)
+    assert ei.value.empresa == "Empresa 111"
+    assert store.marcou  # checkpoint gravado antes da falha
+
+
+def test_ja_cumprida_nao_tenta_dar_ciencia(monkeypatch):
+    """Sem ícone de aceite (já cumprida) o fluxo segue direto, sem ciência."""
+    chamou = []
+    monkeypatch.setattr(processo_mod, "abrir_processo", lambda *a, **k: None)
+    monkeypatch.setattr(processo_mod, "urls_aceite", lambda page: [])
+    monkeypatch.setattr(processo_mod, "dar_ciencia", lambda *a, **k: chamou.append("ciencia"))
+    monkeypatch.setattr(processo_mod, "mapa_protocolos", lambda page: {})
+
+    g = agrupar_por_oficio([_intim("10", "111", situacao="Cumprida por Consulta Direta")])[0]
+    with pytest.raises(RuntimeError, match="Lista de Protocolos vazia"):
+        tratativa.tratar_um(_Sess(), object(), g, _Clientes({"111": _ativo("111")}),
+                            store=None, criar_rascunho=False, dar_ciencia=True, log=lambda *a: None)
+    assert chamou == []
