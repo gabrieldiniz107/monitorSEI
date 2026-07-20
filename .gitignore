@@ -5,10 +5,9 @@
 # estado de execução (cookies de sessão + banco de dedup)
 state/
 
-# dados REAIS capturados (CNPJ/nomes de clientes) — não versionar
-tests/fixtures/intimacoes_page.html
-tests/fixtures/intimacoes_frame_*.html
-tests/fixtures/intimacoes*.png
+# dados REAIS capturados (CNPJ/nomes de clientes, ofícios, screenshots) — NUNCA versionar.
+# A pasta tests/fixtures/ só contém dumps reais; os testes sintéticos são inline no código.
+tests/fixtures/
 
 # caches / temporários
 __pycache__/

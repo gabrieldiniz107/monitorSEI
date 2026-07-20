@@ -24,6 +24,9 @@ class Intimacao:
     tipo_intimacao: str      # ex. "Comunica Decisão Administrativa de Cumprimento - URGENTE"
     data_expedicao: str      # como exibido, "dd/mm/aaaa"
     situacao: str            # "Pendente" | "Cumprida por Consulta Direta" | ...
+    # navegação (preenchidos na raspagem; infra_hash é válido só na sessão atual)
+    id_acesso_externo: str = ""   # data-idacext (id da concessão de acesso)
+    consulta_url: str = ""        # URL da página do processo (processo_acesso_externo_consulta.php)
 
     @property
     def prioridade_urgente(self) -> bool:
