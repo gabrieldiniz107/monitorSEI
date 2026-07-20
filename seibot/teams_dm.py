@@ -61,7 +61,13 @@ def _salvar_token(cfg, body: dict) -> None:
         pass
 
 
-def login_device_code(cfg, http: Optional[httpx.Client] = None, log=print) -> None:
+def _print_flush(*a):
+    """O código do device-code precisa aparecer NA HORA; sob cron/pipe o stdout do
+    Python é bufferizado e a mensagem só sairia no fim (inútil para um código com TTL)."""
+    print(*a, flush=True)
+
+
+def login_device_code(cfg, http: Optional[httpx.Client] = None, log=_print_flush) -> None:
     """Login único. Imprime o código, espera você autenticar e salva o refresh token."""
     http = http or httpx.Client(timeout=30)
     if not cfg.graph_tenant_id or not cfg.graph_client_id:
