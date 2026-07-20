@@ -46,12 +46,14 @@ def _msg_tratativa_html(grupo: Grupo, intim: Intimacao, prazo, emails, n_anexos,
 
 
 def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, *,
-              criar_rascunho: bool = False, url_teams: Optional[str] = None, log=print) -> dict:
-    """Trata UM candidato: abre o processo → captura prazo → baixa ofício+anexos → resumo
-    → monta e-mail → (opcional) cria rascunho → notifica Teams → marca 'tratado'.
+              criar_rascunho: bool = False, dar_ciencia: bool = False,
+              url_teams: Optional[str] = None, log=print) -> dict:
+    """Trata UM candidato: abre o processo → [ciência] → prazo → baixa ofício+anexos →
+    resumo → monta e-mail → (opcional) cria rascunho → notifica Teams → marca 'tratado'.
 
-    ⚠️ `abrir_processo` sobre uma intimação PENDENTE DÁ CIÊNCIA (inicia o prazo). O chamador
-    é responsável por só passar Pendente no modo 'real'; nos ensaios usa-se processo já cumprido.
+    ⚠️ `dar_ciencia=True` INICIA O PRAZO (irreversível). Abrir o processo, por si só, não dá
+    ciência — mas sem ela a Lista de Protocolos vem vazia e o prazo não existe, então uma
+    intimação Pendente SÓ pode ser tratada com `dar_ciencia=True`.
     """
     from . import processo, rascunho, resumo
     from .teams import enviar_teams_webhook
@@ -61,7 +63,23 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
     log(f"→ Tratando {grupo.processo} | {intim.destinatario} | {grupo.oficio_desc}")
 
     processo.abrir_processo(page, intim.consulta_url)
+
+    aceites = processo.urls_aceite(page)
+    if aceites:
+        if not dar_ciencia:
+            raise RuntimeError(
+                f"intimação {grupo.doc_id} ainda PENDENTE (aceite não dado) e dar_ciencia=False "
+                "— sem ciência não há Lista de Protocolos nem prazo. Abortado sem tocar nela.")
+        alvo = next((a for a in aceites if a["principal"]), aceites[0])
+        log(f"   ⚠️ DANDO CIÊNCIA (doc {alvo['num']}) — inicia o prazo…")
+        processo.dar_ciencia(page, alvo["url"])
+        store.marcar_tratado(intim, "")   # checkpoint: ciência dada, prazo já corre
+        processo.abrir_processo(page, intim.consulta_url)  # recarrega já com os links vivos
+        log("   ✓ ciência confirmada")
+
     protos = processo.mapa_protocolos(page)
+    if not protos:
+        raise RuntimeError("Lista de Protocolos vazia mesmo após a ciência — abortado.")
     resp_url = processo.url_peticionar_resposta(page)
     prazo = processo.capturar_prazo(page, resp_url) if resp_url else None
     log(f"   prazo: {prazo.data_limite if prazo else '—'}")
@@ -71,7 +89,9 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
         raise RuntimeError(f"ofício {grupo.doc_id} não achado na Lista de Protocolos")
     oficio_texto = processo.baixar(ctx, of["url"]).decode("iso-8859-1", errors="replace")
 
-    anexos_nums = processo.extrair_anexos(oficio_texto)
+    # anexos: a Lista de Protocolos manda; o texto do ofício só define a ordem
+    anexos_nums = processo.anexos_de_protocolos(
+        protos, grupo.doc_id, processo.extrair_anexos(oficio_texto))
     anexos: list[tuple[str, bytes]] = []
     descr_anexos: list[str] = []
     for num in anexos_nums:
@@ -79,8 +99,6 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
         if p:
             anexos.append((_nome_arquivo(p["tipo"], num), processo.baixar(ctx, p["url"])))
             descr_anexos.append(f"{p['tipo']} (SEI nº {num})")
-        else:
-            log(f"   (anexo {num} citado no ofício, mas não está na Lista de Protocolos)")
 
     of_pdf = processo.oficio_pdf(page, of["url"])
     log(f"   ofício PDF: {len(of_pdf)} bytes | anexos: {len(anexos)}")

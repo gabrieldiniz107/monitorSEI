@@ -11,11 +11,18 @@ Jurídico da SCM. Contexto amplo do Jurídico está no CLAUDE.md da raiz do proj
 
 ## ⚠️ Regra de ouro
 
-O bot é **estritamente somente-leitura**. **NUNCA** clica na coluna "Ações"/lupa, **nunca**
-abre uma intimação "Pendente", **nunca** dá ciência. Abrir/consultar uma intimação Pendente
-a converte em "Cumprida por Consulta Direta" e **INICIA O PRAZO** do processo. Toda a Fase 1
-só raspa listagens em texto. (A Fase 2 vai dar ciência de propósito, mas só para clientes
-individuais ATIVOS e atrás de uma flag separada — ver no fim.)
+Na **Fase 1** o bot é **estritamente somente-leitura**: só raspa listagens em texto, nunca
+dá ciência. A **Fase 2** dá ciência de propósito, mas só para individual + cliente ATIVO e
+atrás de um comando separado (`tratar --modo real`) — nunca no `run` de produção.
+
+**CORREÇÃO IMPORTANTE (2026-07-20, validado numa intimação Pendente real):** durante muito
+tempo assumimos que *abrir* o processo já dava ciência. **Não dá.** Abrir
+`processo_acesso_externo_consulta.php` é seguro: mostra só cabeçalho, Lista de Protocolos
+(números/tipos) e Andamentos, com os links dos documentos inertes
+(`alert('Sem acesso ao documento.')`). **A ciência é um passo discreto e explícito** — o
+modal `md_pet_intimacao_usu_ext_confirmar_aceite` + botão `#sbmAceitarIntimacao`. Só esse
+clique inicia o prazo. (A lupa da tela de Intimações também só *abre* o processo — ela não
+dá ciência sozinha.)
 
 ---
 
@@ -215,11 +222,53 @@ Individual **não-ativo/fora da base** → continua só notificando o Jurídico 
     ofício PDF 163 KB, 2 anexos, rascunho criado no `juridico@` com os 4 e-mails da empresa,
     Teams notificado. **51 testes.** POWERAUTOMATE_RASCUNHO_URL no `.env`.
 
-### ⚠️ Ainda NÃO está pronto para produção (2026-07-16)
-- Faltam **ajustes** (texto/tom do e-mail, template, refinos — a definir com o usuário).
-- O **modo `real` (que DÁ CIÊNCIA)** ainda **não foi exercitado** — é mecanicamente igual ao
-  ensaio-geral, mas a única forma de testar de verdade é **esperar chegar uma intimação
-  individual PENDENTE** e abri-la passo a passo, com o usuário acompanhando (a ciência inicia
-  o prazo, é irreversível). **Aguardando um processo individual pendente para o teste real.**
-- A tela de "Resposta" (prazo) num PENDENTE ainda não foi vista — confirmar que o
-  `#selTipoResposta` aparece igual antes da ciência (deve, mas validar no 1º pendente).
+### ✅ Mapeamento do PENDENTE real — feito (2026-07-20)
+
+Primeira intimação individual+ativa+Pendente: **proc `53508.003179/2026-50`, Ofício 70
+(15981104), Cabos Brasil Europa Ltda**, Requerimento de Informações, expedida 20/07/2026,
+processo "Fiscalização: Segurança Cibernética", nível **Sigiloso**. Mapeada e tratada
+ponta a ponta. O que se aprendeu:
+
+**1. Abrir o processo NÃO dá ciência** (ver Regra de Ouro). Antes do aceite:
+`mapa_protocolos()` volta **vazio** (links inertes) e `url_peticionar_resposta()` volta
+**None** — ou seja, **o prazo não é legível antes da ciência**.
+
+**2. A tela de consentimento.** Na linha de cada documento da intimação há um ícone
+`intimacao_nao_cumprida_doc_principal|doc_anexo.svg` com
+`onclick="infraAbrirJanelaModal('…acao=md_pet_intimacao_usu_ext_confirmar_aceite
+&id_acesso_externo=…&id_documento=…&id_intimacao[]=…&infra_hash=…', 900, 470)"`.
+A tela explica o aceite e traz **`#sbmAceitarIntimacao`** ("Confirmar Consulta à Intimação")
+e `#sbmFechar`. Confirmar **um** documento cumpre a intimação inteira (mesmo `id_intimacao[]`).
+Texto útil: *"considerar-se-á cumprida a intimação com a presente consulta … ou, não efetuada
+a consulta, em 10 dias após a data de sua expedição"* — o decurso tácito aparece explícito
+(aqui, 30/07/2026). Nenhum diálogo JS nativo é usado.
+
+**3. Depois da ciência** tudo destrava: os links viram `documento_consulta_externa.php`,
+nasce a **"Certidão de Intimação Cumprida"** na Lista de Protocolos e aparece o ícone de
+resposta (a URL ganha um `id_aceite[]=…` novo). O `#selTipoResposta` traz o prazo no **mesmo
+formato** do já-cumprido → `parse_prazo` não precisou mudar:
+`"Resposta a Requerimento de Informações (15 Dias) - Data Limite: 04/08/2026"`.
+(Dar ciência hoje moveu o prazo de 30/07 tácito p/ **04/08/2026**.)
+
+**4. Anexos NÃO saem do texto do ofício.** O Ofício 70 citava `(SEI nº …)` de **1 dos 2**
+anexos → o 1º rascunho foi criado sem a Planilha de Maturidade. Corrigido: a fonte primária
+agora é a **Lista de Protocolos** (`processo.anexos_de_protocolos`) = tudo que não é o ofício
+nem a Certidão de Intimação Cumprida. `extrair_anexos` (texto) virou secundário, só ordena.
+
+**Mudanças de código daí (2026-07-20):** `processo.urls_aceite()` e `processo.dar_ciencia()`;
+`processo.anexos_de_protocolos()`; `tratativa.tratar_um` ganhou `dar_ciencia: bool` e a ordem
+correta (**abrir → ciência → reabrir → protocolos → prazo → downloads**), com **checkpoint**
+`store.marcar_tratado` logo após a ciência (se o pipeline quebrar depois, o prazo já corre e
+o registro não se perde) e **salvaguarda**: se houver ícone de aceite e `dar_ciencia=False`,
+aborta sem tocar em nada. `ensaio`/`completo` passam `dar_ciencia=False`; só `real` passa True.
+**57 testes.**
+
+### ⚠️ Ainda NÃO está pronto para produção
+- Faltam **ajustes de texto/tom do e-mail** ao cliente (template em `rascunho.py` — a definir).
+- O **`tratar --modo real`** (que dá ciência sozinho, sem `--processo`) ainda não foi rodado
+  ponta a ponta: no pendente real fizemos a ciência por script de mapeamento e depois o
+  pipeline via `--modo completo`. O caminho está construído e testado, mas o comando em si
+  espera o próximo pendente.
+- **Nada agenda a Fase 2**: o cron da VPS só roda `run`. Falta decidir cadência do `tratar`.
+- Cliente Cabos Brasil Europa tem **só 1 e-mail** no SharePoint (`julia.castro@ella.link`) —
+  conferir se o cadastro está completo.

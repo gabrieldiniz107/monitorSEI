@@ -1,12 +1,24 @@
-"""Fase 2 / Increment 3 — abrir o processo, capturar o prazo e baixar ofício + anexos.
+"""Fase 2 — abrir o processo, DAR CIÊNCIA, capturar o prazo e baixar ofício + anexos.
 
-Mecânica validada ao vivo (2026-07-16):
-- Ofício: `documento_consulta_externa.php?...&id_documento=X` → HTML (ISO-8859-1).
-- Anexos: referenciados NO TEXTO do ofício como "(SEI nº NNNNNN)"; casam com o nº visível
-  na Lista de Protocolos do processo, de onde se baixa o PDF (ctx.request.get().body()).
-  Ofício sem "(SEI nº …)" ⇒ sem anexos.
-- Prazo: na linha do ofício, o ícone `intimacao_peticionar_resposta` leva (via window.location)
-  à página `acao=md_pet_responder_intimacao_usu_ext`, cujo `#selTipoResposta` tem a opção
+Mecânica validada ao vivo numa intimação PENDENTE real (2026-07-20, proc 53508.003179/2026-50):
+
+- **Abrir o processo NÃO dá ciência.** `processo_acesso_externo_consulta.php` só mostra o
+  cabeçalho, a Lista de Protocolos (números/tipos) e os Andamentos. Antes da ciência os
+  links dos documentos são inertes (`onclick="…alert('Sem acesso ao documento.')"`), o
+  `mapa_protocolos` volta VAZIO e o ícone de resposta (prazo) NÃO existe.
+- **A ciência é um passo discreto**: na linha de cada documento há um ícone
+  `intimacao_nao_cumprida_doc_principal|doc_anexo.svg` cujo onclick é
+  `infraAbrirJanelaModal('…acao=md_pet_intimacao_usu_ext_confirmar_aceite&…')`. Essa tela
+  explica o aceite e traz o botão **`#sbmAceitarIntimacao`** ("Confirmar Consulta à
+  Intimação"). Confirmar UM documento cumpre a intimação inteira (mesmo `id_intimacao[]`).
+- **Depois da ciência** os links viram `documento_consulta_externa.php?...&id_documento=X`,
+  nasce a "Certidão de Intimação Cumprida" na lista e aparece o ícone de resposta.
+- Ofício: `documento_consulta_externa.php` → HTML (ISO-8859-1).
+- **Anexos: vêm da Lista de Protocolos**, não do texto do ofício. São os documentos que não
+  são o ofício nem a Certidão de Intimação Cumprida. (O texto do ofício às vezes cita
+  "(SEI nº NNNNNN)", mas nem sempre cita todos — no Ofício 70 citava 1 de 2.)
+- Prazo: o ícone `intimacao_peticionar_resposta` leva (via window.location) à página
+  `acao=md_pet_responder_intimacao_usu_ext`, cujo `#selTipoResposta` tem a opção
   "<Tipo> (<N> Dias) - Data Limite: DD/MM/AAAA".
 
 ⚠️ A página de resposta é um formulário de peticionamento — aqui SÓ LEMOS o prazo; nunca
@@ -36,8 +48,31 @@ def _para_texto(oficio_html: str) -> str:
 
 
 def extrair_anexos(oficio_html: str) -> list[str]:
-    """Números SEI dos anexos citados no texto do ofício (ordem preservada, sem repetir)."""
+    """Números SEI dos anexos citados no texto do ofício (ordem preservada, sem repetir).
+
+    ⚠️ Fonte SECUNDÁRIA: nem todo ofício cita todos os anexos. A fonte primária é
+    `anexos_de_protocolos()` (a Lista de Protocolos do processo)."""
     return list(dict.fromkeys(_ANEXO_RE.findall(_para_texto(oficio_html))))
+
+
+# documentos da Lista de Protocolos que NÃO são anexos a enviar ao cliente
+_NAO_ANEXO_RE = re.compile(r"certid[ãa]o\s+de\s+intima[çc][ãa]o", re.I)
+
+
+def anexos_de_protocolos(protocolos: dict, doc_id_oficio: str,
+                         citados: "list[str] | None" = None) -> list[str]:
+    """Números dos anexos a enviar: tudo na Lista de Protocolos que não é o ofício nem a
+    'Certidão de Intimação Cumprida' (prova da ciência, interna).
+
+    Fonte PRIMÁRIA de anexos. `citados` (os "(SEI nº …)" do texto do ofício) só reordena,
+    pondo primeiro os que o ofício menciona — nunca restringe o conjunto.
+    """
+    nums = [num for num, p in protocolos.items()
+            if num != doc_id_oficio and not _NAO_ANEXO_RE.search(p.get("tipo", ""))]
+    if not citados:
+        return nums
+    ordem = {n: i for i, n in enumerate(citados)}
+    return sorted(nums, key=lambda n: (ordem.get(n, len(ordem)), n))
 
 
 @dataclass(frozen=True)
@@ -78,6 +113,47 @@ def abrir_processo(page, consulta_url: str) -> None:
         "await new Promise(r=>setTimeout(r,120));}}"
     )
     page.wait_for_timeout(2500)
+
+
+BTN_ACEITAR = "#sbmAceitarIntimacao"
+
+
+def urls_aceite(page) -> list[dict]:
+    """Ícones de aceite da intimação (só existem enquanto ela está PENDENTE).
+
+    -> [{'url', 'num', 'principal'}] — `principal` marca o ícone do Documento Principal
+    (o ofício). Lista vazia ⇒ a intimação já foi cumprida (ciência já dada).
+    """
+    return page.evaluate(
+        "()=>[...document.querySelectorAll('a')].map(a=>{"
+        "const oc=a.getAttribute('onclick')||'';"
+        "const m=oc.match(/infraAbrirJanelaModal\\('([^']+)'/);"
+        "if(!m||!m[1].includes('confirmar_aceite'))return null;"
+        "const tr=a.closest('tr');const tds=tr?[...tr.querySelectorAll('td')]:[];"
+        "const num=tds.find(td=>/^\\d{7,}$/.test(td.innerText.trim()));"
+        "const img=a.querySelector('img')?.getAttribute('src')||'';"
+        "return {url:m[1],num:num?num.innerText.trim():'',"
+        "principal:img.includes('doc_principal')};}).filter(Boolean)"
+    )
+
+
+def dar_ciencia(page, aceite_url: str) -> None:
+    """⚠️ IRREVERSÍVEL — abre a tela de aceite e confirma, INICIANDO O PRAZO.
+
+    Confirmar um documento cumpre a intimação inteira (o modal carrega `id_intimacao[]`).
+    Levanta se o botão de confirmação não estiver na tela (não clica em nada por adivinhação).
+    """
+    try:
+        page.goto(_abs(aceite_url), wait_until="commit")
+    except Exception:
+        pass
+    page.wait_for_timeout(2500)
+    btn = page.locator(BTN_ACEITAR)
+    if btn.count() == 0:
+        raise RuntimeError(
+            f"tela de aceite sem o botão {BTN_ACEITAR} — nada foi confirmado ({page.url})")
+    btn.first.click(timeout=20000)
+    page.wait_for_timeout(3000)
 
 
 def mapa_protocolos(page) -> dict:

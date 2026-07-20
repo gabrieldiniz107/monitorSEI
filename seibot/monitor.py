@@ -148,8 +148,9 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
                 return {"status": "erro",
                         "erro": "ABORTADO: processo Pendente — o ensaio-completo só roda em já cumprido (não dar ciência)."}
             print(f"\n===== TRATAR (ENSAIO-COMPLETO) em {processo_alvo} (Situação: {g.situacao}) =====")
-            r = tratativa.tratar_um(sess, cfg, g, clientes, store,
-                                    criar_rascunho=True, url_teams=cfg.teams_webhook_url or None)
+            r = tratativa.tratar_um(sess, cfg, g, clientes, store, criar_rascunho=True,
+                                    dar_ciencia=False,  # ensaio NUNCA dá ciência
+                                    url_teams=cfg.teams_webhook_url or None)
             return {"status": "ok", "modo": "completo", **r}
 
         if modo == "real":
@@ -159,8 +160,9 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
             tratados, falhas = 0, 0
             for g in candidatos:
                 try:
-                    tratativa.tratar_um(sess, cfg, g, clientes, store,
-                                        criar_rascunho=True, url_teams=cfg.teams_webhook_url or None)
+                    tratativa.tratar_um(sess, cfg, g, clientes, store, criar_rascunho=True,
+                                        dar_ciencia=True,  # modo real: DÁ CIÊNCIA
+                                        url_teams=cfg.teams_webhook_url or None)
                     tratados += 1
                 except Exception as e:
                     falhas += 1
