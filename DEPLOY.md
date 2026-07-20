@@ -45,18 +45,40 @@ CRON_TZ=America/Sao_Paulo
 ```
 (Se precisou de xvfb: `... run --rm sei-monitor xvfb-run -a python -m seibot.monitor run ...`)
 
-## 5. ⚠️ Armar a Fase 2 (ciência automática)
+## 5. Canal de erros — DM no Teams (login único)
 
-O `tratar --modo real` **dá ciência sozinho**, o que **inicia prazo legal e é irreversível**.
-Por isso ele só roda com duas coisas configuradas no `.env`:
+Erros vão para a **DM do responsável técnico**, não para o grupo do Jurídico. Usa Microsoft
+Graph com auth **delegada** (chat no Graph não funciona app-only), mesmo padrão do
+`automacaoVistorias` (CFT/CREA), mesmo app registration "SCM VISTORIAS".
 
+Pré-requisitos no app registration (já existem para as vistorias):
+- Permissões **DELEGADAS** `Chat.Create` + `ChatMessage.Send` + admin consent.
+- Authentication → "Allow public client flows" = **Yes**.
+
+No `.env`: `TEAMS_DEV_EMAIL=gabriel.albuquerque@scmengenharia.com.br`
+
+Login **uma vez** (device-code — abre um código para digitar no navegador):
 ```bash
-TEAMS_WEBHOOK_ERROS_URL=<webhook do Teams do responsável técnico>
-TRATAR_AUTO=true
+docker compose run --rm sei-monitor python -m seibot.teams_dm --login
+docker compose run --rm sei-monitor python -m seibot.teams_dm --teste "ping do monitorSEI"
+```
+O refresh token fica em `state/.graph_token.json` (volume, sobrevive ao container) e o
+`chatId` em `state/.teams_chats.json` — o Graph **não** deduplica chats, sem esse cache cada
+execução criaria um chat novo.
+
+⚠️ **O refresh token expira.** Se morrer, a DM falha e o erro fica só em
+`/var/log/sei-tratativa.log` (com aviso bem visível). Confira de tempos em tempos:
+```bash
+docker compose run --rm sei-monitor python -m seibot.teams_dm --token
 ```
 
-Sem `TRATAR_AUTO=true` o comando recusa rodar (falha alto, com mensagem — não é no-op
-silencioso). **Deixe `false` até o webhook de erros estar funcionando**, senão uma falha no
+## 6. ⚠️ Armar a Fase 2 (ciência automática)
+
+O `tratar --modo real` **dá ciência sozinho**, o que **inicia prazo legal e é irreversível**.
+Por isso ele só roda com `TRATAR_AUTO=true` no `.env`.
+
+Sem isso o comando recusa rodar (falha alto, com mensagem — não é no-op silencioso).
+**Deixe `false` até a DM de erro estar funcionando** (passo 5 testado), senão uma falha no
 meio da tratativa fica sem ninguém sabendo — e o caso pior é justamente esse (ver abaixo).
 
 ### Falha depois da ciência = ação manual
@@ -70,7 +92,10 @@ tratativa à mão. Não ignorar esse alerta.
 | Destino | Conteúdo |
 |---|---|
 | Grupo "monitor sei juridico" | intimações novas (Fase 1) + resumo de cada tratativa (Fase 2) |
-| `TEAMS_WEBHOOK_ERROS_URL` | **qualquer** exceção, mapeada ou não, com traceback |
+| DM do `TEAMS_DEV_EMAIL` | **qualquer** exceção, mapeada ou não, com traceback |
+
+Erro de automação **nunca** vai para o grupo — é ruído para o time jurídico e não há o que
+eles façam a respeito.
 
 ## Comandos úteis
 - `python -m seibot.monitor dry-run` — mostra o que seria notificado, sem tocar banco/Teams.

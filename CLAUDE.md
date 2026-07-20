@@ -268,9 +268,18 @@ aborta sem tocar em nada. `ensaio`/`completo` passam `dar_ciencia=False`; só `r
 Rodar **tudo automático** no cron, com **alerta de erro no Teams do responsável técnico**.
 Implementado:
 
-- **`seibot/erros.py`** — `notificar_erro(cfg, contexto, exc, critico=)`. Manda traceback ao
-  `TEAMS_WEBHOOK_ERROS_URL` (fallback: webhook do grupo). **Nunca levanta** — falhar ao avisar
+- **`seibot/erros.py`** — `notificar_erro(cfg, contexto, exc, critico=)`. Manda traceback para
+  a **DM do responsável técnico** (`TEAMS_DEV_EMAIL`). **Nunca levanta** — falhar ao avisar
   não pode virar uma segunda falha. Trunca traceback em 2500 chars, escapa HTML.
+  **Erro NUNCA vai para o grupo do Jurídico** (é ruído; eles não têm o que fazer com isso).
+- **`seibot/teams_dm.py`** — DM via **Graph delegado**, porte do
+  `automacaoVistorias/cft/src/teams_notify.py`. Chat no Graph **não funciona app-only** →
+  login device-code único (`python -m seibot.teams_dm --login`), refresh token em
+  `state/.graph_token.json`, cache de `chatId` em `state/.teams_chats.json` (o Graph não
+  deduplica chats — sem cache criaria um novo a cada execução). Escopos **delegados**
+  `Chat.Create` + `ChatMessage.Send`, mesmo app "SCM VISTORIAS".
+  ⚠️ **O refresh token expira**; se morrer, a DM falha e o erro fica só no log (com aviso
+  bem visível). Conferir com `python -m seibot.teams_dm --token`.
 - **`monitor.main()`** tem `try/except` global: **qualquer** exceção, mapeada ou não, em
   qualquer comando, vira alerta. `run` também alerta falha por ofício.
 - **`TRATAR_AUTO`** (novo, default `false`): trava que arma o `--modo real`. Verificada
@@ -292,8 +301,11 @@ Implementado:
   ciência). Só suas partes.
 - **Falha pós-ciência não tem retry** — por design (evita ciência dupla). Depende de humano
   reagir ao alerta crítico.
-- **`TEAMS_WEBHOOK_ERROS_URL` ainda não existe** — precisa criar o fluxo no Power Automate
-  apontando para o Teams do Gabriel. Enquanto vazio, erro cai no grupo.
+- **O login device-code da DM ainda não foi feito** — sem `state/.graph_token.json` nenhum
+  erro é notificado (só log). Rodar `python -m seibot.teams_dm --login` e testar com
+  `--teste "ping"` **antes** de armar `TRATAR_AUTO=true`.
+- **Sem fallback para o grupo** (decisão do usuário, 2026-07-20): se a DM falhar, o erro fica
+  só no log. Trade-off aceito para não poluir o grupo do Jurídico.
 - Faltam **ajustes de texto/tom do e-mail** ao cliente (template em `rascunho.py`).
 - Cliente Cabos Brasil Europa tem **só 1 e-mail** no SharePoint (`julia.castro@ella.link`) —
   conferir se o cadastro está completo.
