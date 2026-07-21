@@ -63,3 +63,94 @@ def test_parse_prazo_variacao_espacos():
 def test_parse_prazo_sem_prazo_retorna_none():
     assert parse_prazo("Público") is None
     assert parse_prazo("") is None
+
+
+# --- abrir_processo: resiliência a navegação no meio do carregamento -----------------
+# Regressão do proc 53539.000753/2026-51 (21/07/2026): "Execution context was destroyed,
+# most likely because of a navigation" derrubou a tratativa antes da ciência.
+from seibot import processo as _p  # noqa: E402
+
+_ERRO_NAV = "Page.evaluate: Execution context was destroyed, most likely because of a navigation"
+
+
+class _FakePage:
+    """Page mínima: falha nos N primeiros `evaluate` com o erro indicado."""
+
+    def __init__(self, falhas=0, erro=_ERRO_NAV, altura=900):
+        self.falhas, self.erro, self.altura = falhas, erro, altura
+        self.gotos, self.scrolls = [], []
+
+    def goto(self, url, **kw):
+        self.gotos.append(url)
+
+    def wait_for_load_state(self, *a, **kw):
+        pass
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def evaluate(self, expr, arg=None):
+        if self.falhas > 0:
+            self.falhas -= 1
+            raise RuntimeError(self.erro)
+        if "scrollTo" in expr:
+            self.scrolls.append(arg)
+            return None
+        return self.altura
+
+
+def test_abrir_processo_retenta_quando_a_pagina_navega():
+    page = _FakePage(falhas=1)
+    _p.abrir_processo(page, "/proc?id=1")
+    assert len(page.gotos) == 2          # reabriu
+    assert page.scrolls == [0, 300, 600, 900]
+
+
+def test_abrir_processo_nao_retenta_erro_alheio():
+    page = _FakePage(falhas=1, erro="boom qualquer")
+    try:
+        _p.abrir_processo(page, "/proc?id=1")
+        assert False, "deveria ter propagado"
+    except RuntimeError as e:
+        assert "boom" in str(e)
+    assert len(page.gotos) == 1          # não retentou
+
+
+def test_abrir_processo_desiste_apos_as_tentativas():
+    page = _FakePage(falhas=99)
+    try:
+        _p.abrir_processo(page, "/proc?id=1", tentativas=3)
+        assert False, "deveria ter propagado"
+    except RuntimeError as e:
+        assert "Execution context" in str(e)
+    assert len(page.gotos) == 3
+
+
+def test_scroll_acompanha_pagina_que_cresce_com_lazy_load():
+    page = _FakePage(altura=300)
+
+    class _Cresce(_FakePage):
+        def evaluate(self, expr, arg=None):
+            if "scrollTo" in expr:
+                self.scrolls.append(arg)
+                return None
+            self.altura = min(self.altura + 300, 1200)   # cresce enquanto rola
+            return self.altura
+
+    page = _Cresce(altura=300)
+    _p.abrir_processo(page, "/proc?id=1")
+    assert page.scrolls[-1] >= 1200      # chegou ao fim da página já crescida
+
+
+def test_scroll_tem_teto_de_passos():
+    class _Infinita(_FakePage):
+        def evaluate(self, expr, arg=None):
+            if "scrollTo" in expr:
+                self.scrolls.append(arg)
+                return None
+            self.altura += 10_000        # nunca alcança o fim
+            return self.altura
+
+    page = _Infinita()
+    _p.abrir_processo(page, "/proc?id=1")
+    assert len(page.scrolls) == _p._MAX_PASSOS_SCROLL

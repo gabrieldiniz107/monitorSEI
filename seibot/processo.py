@@ -100,19 +100,71 @@ def _abs(url: str) -> str:
     return url if url.startswith("http") else BASE + url
 
 
-def abrir_processo(page, consulta_url: str) -> None:
+# mensagens de erro do Playwright que significam "a página navegou embaixo de nós".
+# São transitórias: basta reabrir. NÃO inclui "browser has been closed" (aí retentar é inútil).
+_ERROS_NAVEGACAO = (
+    "execution context was destroyed",
+    "frame was detached",
+    "frame got detached",
+    "navigating and changing the content",
+)
+
+# teto de passos do scroll (300px cada) — trava contra página que cresce sem parar
+_MAX_PASSOS_SCROLL = 60
+
+
+def _eh_erro_navegacao(exc: Exception) -> bool:
+    return any(m in str(exc).lower() for m in _ERROS_NAVEGACAO)
+
+
+def _scroll_lazy(page) -> None:
+    """Rola a página até o fim, em passos CURTOS, para disparar o lazy-load dos ícones de Ação.
+
+    Antes isto era UM `evaluate` assíncrono longo (o laço de scroll rodava inteiro dentro do
+    browser, vários segundos). Se a página navegasse sozinha nesse meio-tempo, o contexto JS
+    morria e o Playwright levantava "Execution context was destroyed" — foi o que derrubou a
+    tratativa do proc 53539.000753/2026-51 em 21/07/2026. Em passos curtos, cada `evaluate`
+    dura milissegundos: a janela de exposição fica mínima e o que sobrar é retentável.
+    """
+    altura = page.evaluate("()=>document.body.scrollHeight") or 0
+    y = 0
+    for _ in range(_MAX_PASSOS_SCROLL):
+        if y > altura:
+            break
+        page.evaluate("y=>window.scrollTo(0,y)", y)
+        page.wait_for_timeout(120)
+        y += 300
+        # o lazy-load faz a página crescer enquanto rolamos
+        altura = max(altura, page.evaluate("()=>document.body.scrollHeight") or 0)
+
+
+def abrir_processo(page, consulta_url: str, tentativas: int = 3) -> None:
     """Abre a página do processo (Disponibilização Parcial de Documentos) e carrega os
-    ícones lazy rolando a página inteira."""
-    try:
-        page.goto(_abs(consulta_url), wait_until="commit")
-    except Exception:
-        pass
-    page.wait_for_timeout(3000)
-    page.evaluate(
-        "async ()=>{for(let y=0;y<=document.body.scrollHeight;y+=300){window.scrollTo(0,y);"
-        "await new Promise(r=>setTimeout(r,120));}}"
-    )
-    page.wait_for_timeout(2500)
+    ícones lazy rolando a página inteira.
+
+    Retenta quando a página navega sozinha no meio do carregamento (redirect/recarga do SEI).
+    **Retentar aqui é seguro**: abrir o processo NÃO dá ciência — só o clique explícito em
+    `#sbmAceitarIntimacao` dá (ver o cabeçalho deste módulo).
+    """
+    url = _abs(consulta_url)
+    for tentativa in range(1, tentativas + 1):
+        try:
+            try:
+                page.goto(url, wait_until="commit")
+            except Exception:
+                pass  # com 'commit' o goto às vezes levanta mesmo tendo carregado
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass  # sem DOMContentLoaded seguimos assim mesmo: o settle-wait abaixo cobre
+            page.wait_for_timeout(1500)
+            _scroll_lazy(page)
+            page.wait_for_timeout(2500)
+            return
+        except Exception as e:
+            if tentativa >= tentativas or not _eh_erro_navegacao(e):
+                raise
+            page.wait_for_timeout(2000)  # deixa a navegação que atropelou terminar
 
 
 BTN_ACEITAR = "#sbmAceitarIntimacao"
