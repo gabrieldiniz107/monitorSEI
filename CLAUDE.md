@@ -291,6 +291,23 @@ Implementado:
 
 **66 testes.**
 
+### Regra de adimplência (decisão do usuário, 2026-07-21)
+
+Tratativa automática (que **dá ciência**) exige **ativo E não-inadimplente**. Cliente ativo
+porém **inadimplente** não é aberto nem recebe ciência — o Jurídico é avisado na própria
+mensagem do `run`, com o motivo, e trata à mão.
+
+- Fonte única da regra: **`clientes.motivo_sem_tratativa(info)`** (`None` = pode tratar).
+  Consumida por `tratativa.eh_candidato` (seleção) **e** por `notify._decisao_individual`
+  (aviso) — de propósito, para as duas nunca divergirem.
+- **Só o inadimplente EXPLÍCITO bloqueia.** `adimplencia is None` (cliente ativo sem registro
+  na lista Financeiro) **não** bloqueia. Medido em 2026-07-21: dos **1.082 ativos** → 680
+  adimplentes, 210 inadimplentes, **192 sem registro**. Bloquear os 192 jogaria 18% dos
+  ativos na fila manual por lacuna de cadastro, não por inadimplência real.
+- ⚠️ **O `docker-compose.yml` só monta `./state`** — o código roda **da imagem**. Toda mudança
+  de regra exige `docker compose build` antes do próximo cron, senão o container segue com a
+  regra velha.
+
 ### ⚠️ Riscos conhecidos ao ligar (leia antes de armar `TRATAR_AUTO=true`)
 - **`processo.dar_ciencia()` nunca executou.** No pendente real a ciência foi dada pelo script
   de mapeamento (`ciencia.py`, descartável), não por essa função. Ela reproduz exatamente o

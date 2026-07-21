@@ -137,3 +137,29 @@ def test_ja_cumprida_nao_tenta_dar_ciencia(monkeypatch):
         tratativa.tratar_um(_Sess(), object(), g, _Clientes({"111": _ativo("111")}),
                             store=None, criar_rascunho=False, dar_ciencia=True, log=lambda *a: None)
     assert chamou == []
+
+
+# --- regra de adimplência (decisão 2026-07-21) -------------------------------------
+def _ativo_inadimplente(cnpj, detalhe="Inadimplente 2 Parcelas"):
+    return ClienteInfo(cnpj=cnpj, em_base=True, status_raw="Ativo",
+                       adimplencia="inadimplente", adimplencia_detalhe=detalhe)
+
+
+def test_ativo_inadimplente_nao_eh_candidato():
+    """Ativo mas inadimplente: o bot NÃO abre nem dá ciência (só avisa o Jurídico)."""
+    g = agrupar_por_oficio([_intim("10", "111")])
+    cli = _Clientes({"111": _ativo_inadimplente("111")})
+    assert selecionar_candidatos(g, cli) == []
+
+
+def test_ativo_adimplente_explicito_eh_candidato():
+    g = agrupar_por_oficio([_intim("10", "111")])
+    info = ClienteInfo(cnpj="111", em_base=True, status_raw="Ativo", adimplencia="adimplente")
+    assert len(selecionar_candidatos(g, _Clientes({"111": info}))) == 1
+
+
+def test_ativo_sem_registro_financeiro_eh_candidato():
+    """`adimplencia=None` (sem registro no Financeiro, ~18% dos ativos) NÃO bloqueia."""
+    g = agrupar_por_oficio([_intim("10", "111")])
+    info = ClienteInfo(cnpj="111", em_base=True, status_raw="Ativo", adimplencia=None)
+    assert len(selecionar_candidatos(g, _Clientes({"111": info}))) == 1

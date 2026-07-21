@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from .clientes import BaseClientes
+from .clientes import BaseClientes, motivo_sem_tratativa
 from .models import Grupo, Intimacao
 
 SITUACAO_PENDENTE = "Pendente"
@@ -175,10 +175,14 @@ def eh_candidato(g: Grupo, clientes: Optional[BaseClientes]) -> bool:
         return False
     if clientes is None:
         return False  # sem base não dá p/ afirmar que é ativo → não trata
-    info = clientes.info(intim.documento)
-    return info is not None and info.ativo
+    # mesma regra do aviso ao Jurídico (notify): ativo E não-inadimplente
+    return motivo_sem_tratativa(clientes.info(intim.documento)) is None
 
 
 def selecionar_candidatos(grupos: list[Grupo], clientes: Optional[BaseClientes]) -> list[Grupo]:
-    """Grupos individuais + cliente ATIVO + Situação Pendente."""
+    """Grupos individuais + Situação Pendente + cliente ATIVO e NÃO-INADIMPLENTE.
+
+    Inadimplente ativo fica de fora de propósito (decisão 2026-07-21): o bot não abre nem
+    dá ciência — o Jurídico é avisado pelo `run` com o motivo e trata à mão.
+    """
     return [g for g in grupos if eh_candidato(g, clientes)]

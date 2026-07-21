@@ -116,3 +116,22 @@ def test_html_individual_tem_decisao_em_negrito():
     clientes = _ClientesFake({"111": ClienteInfo(cnpj="111", em_base=True, status_raw="Ativo")})
     html = formatar_grupo_html(g, clientes)
     assert "Cliente ATIVO" in html and "<b>" in html
+
+
+def test_individual_ativo_inadimplente_sem_tratativa_com_motivo():
+    """Ativo + inadimplente: aviso ao Jurídico com o motivo, sem tratativa automática."""
+    g = agrupar_por_oficio([_intim("111", "Ativa")])[0]
+    clientes = _ClientesFake({"111": ClienteInfo(
+        cnpj="111", em_base=True, status_raw="Ativo",
+        adimplencia="inadimplente", adimplencia_detalhe="Inadimplente 2 Parcelas")})
+    msg = formatar_grupo(g, clientes)
+    assert "Sem tratativa automática" in msg
+    assert "INADIMPLENTE (Inadimplente 2 Parcelas)" in msg
+    assert "Cliente ATIVO e adimplente" not in msg
+
+
+def test_individual_ativo_sem_registro_financeiro_segue_tratativa():
+    g = agrupar_por_oficio([_intim("111", "Ativa")])[0]
+    clientes = _ClientesFake({"111": ClienteInfo(cnpj="111", em_base=True, status_raw="Ativo",
+                                                 adimplencia=None)})
+    assert "tratativa individual" in formatar_grupo(g, clientes)

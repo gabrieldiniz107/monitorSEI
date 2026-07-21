@@ -57,6 +57,29 @@ class ClienteInfo:
     def ativo(self) -> bool:
         return self.status_raw == "Ativo" or self.contrato_ativo
 
+    @property
+    def inadimplente(self) -> bool:
+        """Só o inadimplente EXPLÍCITO conta. Cliente ativo sem registro no Financeiro
+        (`adimplencia is None`, ~18% dos ativos) NÃO é tratado como inadimplente."""
+        return self.adimplencia == "inadimplente"
+
+
+def motivo_sem_tratativa(info: Optional[ClienteInfo]) -> Optional[str]:
+    """Motivo para NÃO fazer a tratativa automática — `None` significa "pode tratar".
+
+    Fonte ÚNICA da regra: usada tanto pela seleção de candidatos (`tratativa`) quanto pelo
+    aviso ao Jurídico (`notify`), para as duas nunca divergirem. Tratativa automática dá
+    CIÊNCIA (irreversível) ⇒ exige cliente **ativo e não-inadimplente** (decisão 2026-07-21).
+    """
+    if info is None:
+        return "empresa fora da base de clientes"
+    if not info.ativo:
+        return f"cliente não-ativo ({info.status_raw or 'sem status'})"
+    if info.inadimplente:
+        det = f" ({info.adimplencia_detalhe})" if info.adimplencia_detalhe else ""
+        return f"cliente INADIMPLENTE{det}"
+    return None
+
 
 class BaseClientes(Protocol):
     def status(self, cnpj: str) -> Optional[str]: ...

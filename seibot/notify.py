@@ -9,7 +9,7 @@ from __future__ import annotations
 import html as _html
 from typing import Optional
 
-from .clientes import BaseClientes
+from .clientes import BaseClientes, motivo_sem_tratativa
 from .models import Grupo, Intimacao
 from .teams import enviar_teams_webhook
 
@@ -46,23 +46,16 @@ def _linha_empresa(intim: Intimacao, clientes: Optional[BaseClientes]) -> str:
     return f"{intim.destinatario} — {intim.documento_fmt}{_anotacao_status(intim, clientes)}"
 
 
-def _motivo_nao_ativo(intim: Intimacao, clientes: BaseClientes) -> str:
-    """Motivo pelo qual NÃO segue a tratativa individual (para o Jurídico)."""
-    info = clientes.info(intim.documento)
-    if info is None:
-        return "empresa fora da base de clientes"
-    return f"cliente não-ativo ({info.status_raw or 'sem status'})"
-
-
 def _decisao_individual(intim: Intimacao, clientes: Optional[BaseClientes]) -> Optional[str]:
     """Linha de decisão da tratativa individual. None se sem base p/ decidir."""
     if clientes is None:
         return None
-    info = clientes.info(intim.documento)
-    if info is not None and info.ativo:
-        return "▶️ Cliente ATIVO — seguir com a tratativa individual (abrir, prazo, ofício, e-mail)."
+    motivo = motivo_sem_tratativa(clientes.info(intim.documento))
+    if motivo is None:
+        return ("▶️ Cliente ATIVO e adimplente — seguir com a tratativa individual "
+                "(abrir, prazo, ofício, e-mail).")
     return ("⛔ Sem tratativa automática — apenas ciência ao Jurídico. "
-            f"Motivo: {_motivo_nao_ativo(intim, clientes)}.")
+            f"Motivo: {motivo}. Tratar à mão.")
 
 
 def formatar_grupo(g: Grupo, clientes: Optional[BaseClientes] = None) -> str:
