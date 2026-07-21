@@ -251,12 +251,12 @@ formato** do já-cumprido → `parse_prazo` não precisou mudar:
 (Dar ciência hoje moveu o prazo de 30/07 tácito p/ **04/08/2026**.)
 
 **4. Anexos NÃO saem do texto do ofício.** O Ofício 70 citava `(SEI nº …)` de **1 dos 2**
-anexos → o 1º rascunho foi criado sem a Planilha de Maturidade. Corrigido: a fonte primária
-agora é a **Lista de Protocolos** (`processo.anexos_de_protocolos`) = tudo que não é o ofício
-nem a Certidão de Intimação Cumprida. `extrair_anexos` (texto) virou secundário, só ordena.
+anexos → o 1º rascunho foi criado sem a Planilha de Maturidade. `extrair_anexos` (texto)
+virou secundário, só ordena. (A fonte primária virou a Lista de Protocolos — e depois foi
+corrigida de novo em 2026-07-21, ver "Anexos = documentos da intimação" abaixo.)
 
 **Mudanças de código daí (2026-07-20):** `processo.urls_aceite()` e `processo.dar_ciencia()`;
-`processo.anexos_de_protocolos()`; `tratativa.tratar_um` ganhou `dar_ciencia: bool` e a ordem
+`tratativa.tratar_um` ganhou `dar_ciencia: bool` e a ordem
 correta (**abrir → ciência → reabrir → protocolos → prazo → downloads**), com **checkpoint**
 `store.marcar_tratado` logo após a ciência (se o pipeline quebrar depois, o prazo já corre e
 o registro não se perde) e **salvaguarda**: se houver ícone de aceite e `dar_ciencia=False`,
@@ -307,6 +307,28 @@ mensagem do `run`, com o motivo, e trata à mão.
 - ⚠️ **O `docker-compose.yml` só monta `./state`** — o código roda **da imagem**. Toda mudança
   de regra exige `docker compose build` antes do próximo cron, senão o container segue com a
   regra velha.
+
+### Anexos = documentos DA INTIMAÇÃO (correção 2026-07-21)
+
+A Lista de Protocolos traz o **processo inteiro**, não a intimação. Usá-la como fonte de
+anexos mandou o histórico do processo para o cliente: o rascunho da SPEEDMAX (proc
+53500.039627/2026-23) saiu com **14 anexos**.
+
+**Fonte primária agora: os ícones de aceite.** Eles listam exatamente os documentos da
+intimação (`doc_principal` + `doc_anexo`) — é a definição do próprio SEI. Medido ao vivo no
+proc 53539.000753/2026-51: **aceites = 2** (Ofício 268 + Despacho Decisório 476) enquanto a
+**Lista de Protocolos = 4** (sobravam "Consulta CNPJ" e "Consulta", documentos **internos da
+Anatel** que não podem ir para o cliente).
+
+- `processo.anexos_da_intimacao(protocolos, doc_id_oficio, docs_intimacao, citados)`
+  (substituiu `anexos_de_protocolos`).
+- ⚠️ **Os ícones de aceite somem depois da ciência** ⇒ `tratativa.tratar_um` captura os nºs
+  **antes** de dar ciência e repassa a `_tratar_apos_ciencia`. Não dá para recuperá-los
+  depois — se essa fiação quebrar, cai no fallback silenciosamente.
+- **Fallback** (processo já cumprido, sem ícones): só os `(SEI nº …)` citados no texto do
+  ofício; se não houver, vai só o ofício. Melhor faltar anexo do que vazar documento interno.
+- O rascunho da SPEEDMAX (14 anexos) foi criado ANTES desta correção e **não foi corrigido
+  em retrospecto** — conferir à mão antes de enviar.
 
 ### ⚠️ Riscos conhecidos ao ligar (leia antes de armar `TRATAR_AUTO=true`)
 - **`processo.dar_ciencia()` nunca executou.** No pendente real a ciência foi dada pelo script

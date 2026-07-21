@@ -50,8 +50,8 @@ def _para_texto(oficio_html: str) -> str:
 def extrair_anexos(oficio_html: str) -> list[str]:
     """Números SEI dos anexos citados no texto do ofício (ordem preservada, sem repetir).
 
-    ⚠️ Fonte SECUNDÁRIA: nem todo ofício cita todos os anexos. A fonte primária é
-    `anexos_de_protocolos()` (a Lista de Protocolos do processo)."""
+    ⚠️ Fonte SECUNDÁRIA: nem todo ofício cita todos os anexos. A primária são os documentos
+    da intimação (ícones de aceite) — ver `anexos_da_intimacao()`."""
     return list(dict.fromkeys(_ANEXO_RE.findall(_para_texto(oficio_html))))
 
 
@@ -59,16 +59,25 @@ def extrair_anexos(oficio_html: str) -> list[str]:
 _NAO_ANEXO_RE = re.compile(r"certid[ãa]o\s+de\s+intima[çc][ãa]o", re.I)
 
 
-def anexos_de_protocolos(protocolos: dict, doc_id_oficio: str,
-                         citados: "list[str] | None" = None) -> list[str]:
-    """Números dos anexos a enviar: tudo na Lista de Protocolos que não é o ofício nem a
-    'Certidão de Intimação Cumprida' (prova da ciência, interna).
+def anexos_da_intimacao(protocolos: dict, doc_id_oficio: str,
+                        docs_intimacao: "list[str] | None" = None,
+                        citados: "list[str] | None" = None) -> list[str]:
+    """Números dos anexos a enviar ao cliente: os documentos **da intimação**, menos o ofício.
 
-    Fonte PRIMÁRIA de anexos. `citados` (os "(SEI nº …)" do texto do ofício) só reordena,
-    pondo primeiro os que o ofício menciona — nunca restringe o conjunto.
+    `docs_intimacao` são os nºs lidos dos ícones de aceite ANTES da ciência — é a definição
+    do próprio SEI de "documentos desta intimação" (doc principal + doc anexo). Fonte
+    PRIMÁRIA, porque a Lista de Protocolos traz o processo INTEIRO, com documentos internos
+    da Anatel que não fazem parte da intimação e não devem ir para o cliente. Validado em
+    21/07/2026 no proc 53539.000753/2026-51: a intimação tinha 2 documentos (Ofício 268 +
+    Despacho Decisório 476) e a lista tinha 4 — sobravam "Consulta CNPJ" e "Consulta".
+
+    Sem `docs_intimacao` (processo já cumprido: os ícones de aceite somem após a ciência),
+    cai para os "(SEI nº …)" citados no texto do ofício. `citados` também define a ordem.
     """
-    nums = [num for num, p in protocolos.items()
-            if num != doc_id_oficio and not _NAO_ANEXO_RE.search(p.get("tipo", ""))]
+    base = list(docs_intimacao) if docs_intimacao else list(citados or [])
+    nums = [n for n in dict.fromkeys(base)
+            if n != doc_id_oficio and n in protocolos
+            and not _NAO_ANEXO_RE.search(protocolos[n].get("tipo", ""))]
     if not citados:
         return nums
     ordem = {n: i for i, n in enumerate(citados)}

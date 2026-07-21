@@ -79,6 +79,10 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
 
     ciencia_dada = False
     aceites = processo.urls_aceite(page)
+    # os ícones de aceite são a ÚNICA fonte de "quais documentos são desta intimação" — e
+    # somem depois da ciência. Capturar aqui, antes, senão só resta a Lista de Protocolos
+    # (que é o processo inteiro, com documentos internos da Anatel).
+    docs_intimacao = [a["num"] for a in aceites if a.get("num")]
     if aceites:
         if not dar_ciencia:
             raise RuntimeError(
@@ -94,7 +98,8 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
 
     try:
         return _tratar_apos_ciencia(sess, cfg, grupo, intim, clientes, store,
-                                    criar_rascunho=criar_rascunho, url_teams=url_teams, log=log)
+                                    criar_rascunho=criar_rascunho, url_teams=url_teams,
+                                    docs_intimacao=docs_intimacao, log=log)
     except Exception as e:
         if not ciencia_dada:
             raise
@@ -106,7 +111,8 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
 
 def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
                          clientes: Optional[BaseClientes], store, *,
-                         criar_rascunho: bool, url_teams: Optional[str], log) -> dict:
+                         criar_rascunho: bool, url_teams: Optional[str],
+                         docs_intimacao: Optional[list] = None, log=print) -> dict:
     """Da Lista de Protocolos até o rascunho. Separado para que qualquer falha aqui seja
     classificada como pós-ciência pelo `tratar_um`."""
     from . import processo, rascunho, resumo
@@ -125,9 +131,13 @@ def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
         raise RuntimeError(f"ofício {grupo.doc_id} não achado na Lista de Protocolos")
     oficio_texto = processo.baixar(ctx, of["url"]).decode("iso-8859-1", errors="replace")
 
-    # anexos: a Lista de Protocolos manda; o texto do ofício só define a ordem
-    anexos_nums = processo.anexos_de_protocolos(
-        protos, grupo.doc_id, processo.extrair_anexos(oficio_texto))
+    # anexos: só os documentos DA INTIMAÇÃO (ícones de aceite), nunca o processo inteiro
+    citados = processo.extrair_anexos(oficio_texto)
+    if not docs_intimacao:
+        log("   ⚠️ sem ícones de aceite (processo já cumprido) — anexos vêm só dos "
+            "'(SEI nº …)' citados no texto do ofício.")
+    anexos_nums = processo.anexos_da_intimacao(
+        protos, grupo.doc_id, docs_intimacao, citados)
     anexos: list[tuple[str, bytes]] = []
     descr_anexos: list[str] = []
     for num in anexos_nums:
