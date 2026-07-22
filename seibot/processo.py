@@ -249,6 +249,29 @@ def oficio_pdf(page, oficio_url: str) -> bytes:
     return page.pdf(format="A4", print_background=True)
 
 
+_PDF_MAGIC = b"%PDF"
+
+
+def baixar_como_pdf(page, context, url: str) -> bytes:
+    """Baixa um documento da intimação e devolve SEMPRE um PDF abrível.
+
+    ⚠️ Bug corrigido em 2026-07-22 (rascunho da SITELBRA, proc 53500.064050/2024-26): os
+    anexos eram baixados crus (`baixar`) e salvos com extensão `.pdf`. Mas documentos
+    **gerados no SEI** (Ofício, Despacho Decisório, Informe, Nota Técnica…) NÃO são PDF —
+    `documento_consulta_externa.php` os serve como **HTML** (por isso o ofício tem o
+    `oficio_pdf` dedicado, e por isso `_tratar_apos_ciencia` decodifica o ofício como
+    ISO-8859-1 para o resumo). Salvar esse HTML como `.pdf` gera um arquivo que **não abre**.
+    Só documentos **externos** (upload — ex.: Extrato de Lançamentos) já vêm em PDF.
+
+    Detecta pelo magic number: se já é PDF, devolve os bytes crus; senão (HTML gerado no
+    SEI) renderiza a página via Chromium (`page.pdf`, só headless), igual ao ofício.
+    """
+    bruto = baixar(context, url)
+    if bruto[:4] == _PDF_MAGIC:
+        return bruto
+    return oficio_pdf(page, url)
+
+
 def url_peticionar_resposta(page) -> Optional[str]:
     """URL da página de resposta (onde está o prazo), a partir do ícone azul da linha do
     ofício. None se a intimação não exige resposta (ex.: mero Conhecimento)."""

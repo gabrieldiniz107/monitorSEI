@@ -330,6 +330,34 @@ Anatel** que não podem ir para o cliente).
 - O rascunho da SPEEDMAX (14 anexos) foi criado ANTES desta correção e **não foi corrigido
   em retrospecto** — conferir à mão antes de enviar.
 
+### Anexos gerados no SEI vêm em HTML, não em PDF (correção 2026-07-22)
+
+Rascunho da **SITELBRA** (proc `53500.064050/2024-26`, Ofício 407 / SEI 15843941): dos 4
+arquivos anexados, o **Despacho Decisório 14** (SEI 13227283) e o **Informe 17** (13227113)
+**não abriam**; só o ofício e o **Extrato de Lançamentos** (15996728) abriam.
+
+Causa: os anexos eram baixados crus (`processo.baixar` = `context.request.get().body()`) e
+salvos com extensão `.pdf`. Mas documentos **gerados dentro do SEI** (Ofício, Despacho,
+Informe, Nota Técnica…) **não são PDF** — `documento_consulta_externa.php` os serve como
+**HTML** (é por isso que o ofício sempre teve o `oficio_pdf` dedicado, e que
+`_tratar_apos_ciencia` decodifica o ofício como ISO-8859-1 para o resumo). HTML salvo como
+`.pdf` = arquivo que não abre. Só documentos **externos** (upload — ex.: Extrato) já são PDF.
+
+Fix: **`processo.baixar_como_pdf(page, ctx, url)`** — detecta o magic number `%PDF`; se já é
+PDF devolve cru, senão renderiza a página via `page.pdf()` (headless), igual ao ofício.
+`tratativa._tratar_apos_ciencia` usa esse helper para os anexos. **94 testes.**
+
+- ⚠️ **Requer `HEADLESS=true`** (page.pdf() só roda headless) — produção já é headless.
+- ⚠️ **O rascunho da SITELBRA (e qualquer outro criado antes de 22/07) NÃO foi corrigido em
+  retrospecto** — os PDFs quebrados seguem na caixa do Jurídico. Regerar: `monitor tratar
+  --modo completo --processo 53500.064050/2024-26` (já cumprida → sem ciência) cria um novo
+  rascunho com os PDFs certos; apagar o antigo à mão.
+- **Nuance de contagem de anexos** (não é bug, é decisão pendente): o texto do ofício dizia
+  "Anexo: Despacho Decisório" (1 só), mas a intimação eletrônica do SEI empacotou 4 docs
+  (ofício + Despacho + Extrato + Informe 17). O bot usa a definição do SEI (ícones de aceite
+  = `docs_intimacao`), então mandou os 3. Se o Jurídico quiser restringir ao que o texto
+  chama de "Anexo", é outra regra — decidir com eles.
+
 ### ⚠️ Riscos conhecidos ao ligar (leia antes de armar `TRATAR_AUTO=true`)
 - **`processo.dar_ciencia()` nunca executou.** No pendente real a ciência foi dada pelo script
   de mapeamento (`ciencia.py`, descartável), não por essa função. Ela reproduz exatamente o

@@ -143,7 +143,10 @@ def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
     for num in anexos_nums:
         p = protos.get(num)
         if p:
-            anexos.append((_nome_arquivo(p["tipo"], num), processo.baixar(ctx, p["url"])))
+            # baixar_como_pdf (não baixar cru): documentos gerados no SEI (Despacho, Informe…)
+            # vêm em HTML — salvá-los como .pdf gera arquivo que não abre. Ver processo.py.
+            anexos.append((_nome_arquivo(p["tipo"], num),
+                           processo.baixar_como_pdf(page, ctx, p["url"])))
             descr_anexos.append(f"{p['tipo']} (SEI nº {num})")
 
     of_pdf = processo.oficio_pdf(page, of["url"])

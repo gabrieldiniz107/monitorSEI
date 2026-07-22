@@ -190,3 +190,60 @@ def test_scroll_tem_teto_de_passos():
     page = _Infinita()
     _p.abrir_processo(page, "/proc?id=1")
     assert len(page.scrolls) == _p._MAX_PASSOS_SCROLL
+
+
+# --- baixar_como_pdf: HTML gerado no SEI vira PDF; PDF externo passa cru -------------
+# Regressão do rascunho da SITELBRA (proc 53500.064050/2024-26, 2026-07-22): o Despacho
+# Decisório e o Informe 17 (documentos gerados no SEI = HTML) foram salvos como .pdf e
+# NÃO abriam. Só o Extrato de Lançamentos (upload = PDF de verdade) abria.
+class _FakeResp:
+    def __init__(self, body):
+        self._body, self.status = body, 200
+
+    def body(self):
+        return self._body
+
+
+class _FakeReq:
+    def __init__(self, body):
+        self._body = body
+
+    def get(self, url):
+        return _FakeResp(self._body)
+
+
+class _FakeContext:
+    def __init__(self, body):
+        self.request = _FakeReq(body)
+
+
+class _FakePagePdf:
+    def __init__(self):
+        self.pdf_gotos = []
+
+    def goto(self, url, **kw):
+        self.pdf_gotos.append(url)
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def pdf(self, **kw):
+        return b"%PDF-1.7 renderizado"
+
+
+def test_baixar_como_pdf_pdf_externo_passa_cru():
+    """Extrato de Lançamentos (upload) já é PDF → devolve os bytes crus, sem renderizar."""
+    page = _FakePagePdf()
+    ctx = _FakeContext(b"%PDF-1.5 conteudo real do extrato")
+    out = _p.baixar_como_pdf(page, ctx, "/doc?id=15996728")
+    assert out == b"%PDF-1.5 conteudo real do extrato"
+    assert page.pdf_gotos == []          # não renderizou
+
+
+def test_baixar_como_pdf_html_gerado_no_sei_e_renderizado():
+    """Despacho/Informe (gerados no SEI) vêm em HTML → renderiza via page.pdf()."""
+    page = _FakePagePdf()
+    ctx = _FakeContext(b"<html><body>Despacho Decisorio 14/2025</body></html>")
+    out = _p.baixar_como_pdf(page, ctx, "/doc?id=13227283")
+    assert out == b"%PDF-1.7 renderizado"    # virou PDF de verdade
+    assert page.pdf_gotos                     # navegou para renderizar
