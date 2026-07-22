@@ -22,6 +22,13 @@ INATIVO = "inativo"
 
 # colunas de e-mail na Clientes SCM (para o envio da Fase 2)
 _EMAIL_COLS = ("field_3", "EmailFinanceiro", "EmailTecnico", "EmailAdm")
+# colunas de telefone na Clientes SCM (para o card do ofício — texto livre, não fragmentar)
+_TELEFONE_COLS = ("field_4", "TelefoneFinanceiro", "TelefoneTecnico", "TelefoneAdm")
+# "Pacote" do cliente = o tier do contrato (coluna Servicos da lista Comercial, multi-choice).
+# Ranking p/ desempate quando o cliente tem >1 tier ativo (~5% dos casos): prefere o maior
+# tier de CONECTIVIDADE; JURÍDICO só entra se não houver nenhum (é como os cards manuais estão).
+# ⚠️ Ordem BLACK>ULTRA>FLEX>LIGHT é um palpite — ajustar aqui se o Jurídico definir diferente.
+_TIERS_RANK = {"BLACK": 4, "ULTRA": 3, "FLEX": 2, "LIGHT": 1, "JURÍDICO": 0}
 # vocabulário de Financeiro.Situacao
 _INADIMPLENTE = {"Inadimplente 1 Parcela", "Inadimplente 2 Parcelas",
                  "Análise p/ Inclusão no SERASA", "Negativados SERASA"}
@@ -42,6 +49,29 @@ def _emails_de(fields: dict) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _telefones_de(fields: dict) -> tuple[str, ...]:
+    """Telefones das colunas da Clientes SCM. Valor é texto livre já formatado
+    (ex. '(35) 99940-4274', '33-33151084/33-98818-5640') — não fragmentar; só dedup."""
+    out: list[str] = []
+    for col in _TELEFONE_COLS:
+        v = (fields.get(col) or "").strip()
+        if v and v not in out:
+            out.append(v)
+    return tuple(out)
+
+
+def _como_lista(v) -> list:
+    """Campo multi-choice do Graph vem como lista; single como str. Normaliza p/ lista."""
+    if v is None:
+        return []
+    return v if isinstance(v, list) else [v]
+
+
+def _melhor_pacote(tiers: set) -> str:
+    """Escolhe UM pacote entre os tiers ativos do cliente (ver _TIERS_RANK)."""
+    return max(tiers, key=lambda t: _TIERS_RANK.get(t, -1)) if tiers else ""
+
+
 @dataclass
 class ClienteInfo:
     cnpj: str
@@ -52,6 +82,9 @@ class ClienteInfo:
     adimplencia: Optional[str] = None       # 'adimplente' | 'inadimplente' | None
     adimplencia_detalhe: str = ""
     emails: tuple[str, ...] = ()
+    telefones: tuple[str, ...] = ()
+    sp_item_id: str = ""            # id do item na lista Clientes SCM (alvo do lookup CNPJ)
+    pacote: str = ""               # tier do contrato ativo (Comercial.Servicos), p/ o card
 
     @property
     def ativo(self) -> bool:
@@ -112,16 +145,29 @@ class SharePointClientes:
                 razao=(f.get("field_1") or "").strip(),
                 status_raw=(f.get("StatusContrato") or "").strip(),
                 emails=_emails_de(f),
+                telefones=_telefones_de(f),
+                sp_item_id=str(f.get("id") or ""),
             )
 
-        # 2) Comercial: quem tem contrato "Ativo" (CNPJ é lookup p/ Clientes SCM)
+        # 2) Comercial: quem tem contrato "Ativo" (CNPJ é lookup p/ Clientes SCM) + o tier
+        #    do pacote (coluna Servicos, multi-choice), agregado por CNPJ p/ o card do ofício.
+        tiers_ativos: dict[str, set] = {}
         for it in g.itens(graph.LISTA_COMERCIAL, top=999):
             f = it.get("fields", {})
             cnpj = id2cnpj.get(str(f.get("CNPJLookupId") or ""))
-            if cnpj and (f.get("StatusContrato") or "").strip() == "Ativo":
-                info = self._por_cnpj.get(cnpj)
-                if info:
-                    info.contrato_ativo = True
+            if not cnpj or (f.get("StatusContrato") or "").strip() != "Ativo":
+                continue
+            info = self._por_cnpj.get(cnpj)
+            if info:
+                info.contrato_ativo = True
+            for serv in _como_lista(f.get("Servicos")):
+                s = (serv or "").strip()
+                if s in _TIERS_RANK:
+                    tiers_ativos.setdefault(cnpj, set()).add(s)
+        for cnpj, tiers in tiers_ativos.items():
+            info = self._por_cnpj.get(cnpj)
+            if info:
+                info.pacote = _melhor_pacote(tiers)
 
         # 3) Financeiro: adimplência (Situacao), agregada por CNPJ
         situacoes: dict[str, set[str]] = {}
@@ -145,6 +191,11 @@ class SharePointClientes:
         self._log(f"→ SharePoint: {len(self._por_cnpj)} clientes indexados.")
 
     # ---- API (BaseClientes) ----
+    @property
+    def graph(self):
+        """Cliente Graph subjacente (para quem precisa ESCREVER no site, ex. card do ofício)."""
+        return self._g
+
     def info(self, cnpj: str) -> Optional[ClienteInfo]:
         return self._por_cnpj.get(_dig(cnpj))
 

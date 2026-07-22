@@ -40,21 +40,21 @@ dá ciência sozinha.)
 
 ## Arquitetura (`seibot/`)
 
-| Arquivo | Responsabilidade |
-|---|---|
-| `config.py` | Carrega o `.env` (dataclass `Config`, `load_config()`). |
-| `email_code.py` | Captura o código 2FA via IMAP (`esperar_codigo`). |
-| `login.py` | Login Playwright + 2FA → `LoginSession` (tem `.page`). Chromium com `--no-sandbox`. |
-| `intimacoes.py` | Raspagem + **parser puro** (`parse_pagina`) + navegação (`coletar`). |
-| `models.py` | `Intimacao`, `Grupo` (dataclasses). |
-| `classificar.py` | `agrupar_por_oficio` → coletivo vs individual. |
-| `store.py` | Dedup SQLite (`IntimacoesStore`: `ja_visto`/`marcar_visto`/`marcar_lote`). |
-| `clientes.py` | `SharePointClientes` — cross-check por CNPJ (ver regra de "ativo"). |
-| `graph.py` | Cliente Microsoft Graph (app-only) do SharePoint "Gestão Integrada". |
-| `notify.py` | `formatar_grupo` (texto, p/ dry-run/testes) e `formatar_grupo_html` (Teams) + envio. |
-| `teams.py` | POST no webhook (estilo `text` = `{"text": "..."}`, ou `card`). |
-| `monitor.py` | Orquestrador + CLI: `run` / `baseline` / `dry-run`. |
-| `validar_login.py` | Valida só o login (usado p/ testar Turnstile headless). |
+| Arquivo              | Responsabilidade                                                                          |
+| -------------------- | ----------------------------------------------------------------------------------------- |
+| `config.py`        | Carrega o`.env` (dataclass `Config`, `load_config()`).                              |
+| `email_code.py`    | Captura o código 2FA via IMAP (`esperar_codigo`).                                      |
+| `login.py`         | Login Playwright + 2FA →`LoginSession` (tem `.page`). Chromium com `--no-sandbox`. |
+| `intimacoes.py`    | Raspagem +**parser puro** (`parse_pagina`) + navegação (`coletar`).           |
+| `models.py`        | `Intimacao`, `Grupo` (dataclasses).                                                   |
+| `classificar.py`   | `agrupar_por_oficio` → coletivo vs individual.                                         |
+| `store.py`         | Dedup SQLite (`IntimacoesStore`: `ja_visto`/`marcar_visto`/`marcar_lote`).        |
+| `clientes.py`      | `SharePointClientes` — cross-check por CNPJ (ver regra de "ativo").                    |
+| `graph.py`         | Cliente Microsoft Graph (app-only) do SharePoint "Gestão Integrada".                     |
+| `notify.py`        | `formatar_grupo` (texto, p/ dry-run/testes) e `formatar_grupo_html` (Teams) + envio.  |
+| `teams.py`         | POST no webhook (estilo`text` = `{"text": "..."}`, ou `card`).                      |
+| `monitor.py`       | Orquestrador + CLI:`run` / `baseline` / `dry-run`.                                  |
+| `validar_login.py` | Valida só o login (usado p/ testar Turnstile headless).                                  |
 
 ## Fontes de dados
 
@@ -67,6 +67,7 @@ células por `data-label`. Sem iframe.
 
 **SharePoint "Gestão Integrada"** (`scmprovedor.sharepoint.com/sites/GestaoIntegrada`, via
 Graph app-only, app "SCM VISTORIAS", `Sites.ReadWrite.All`; credenciais `GRAPH_*` no `.env`):
+
 - **Clientes SCM** (`Title`=CNPJ formatado, `StatusContrato`, e-mails em
   `field_3`/`EmailFinanceiro`/`EmailTecnico`/`EmailAdm`).
 - **Comercial** (`StatusContrato` por contrato; CNPJ é lookup `CNPJLookupId`→id da Clientes SCM).
@@ -138,12 +139,14 @@ Objetivo: para cada intimação **nova, individual e de cliente ATIVO**, agir au
 Individual **não-ativo/fora da base** → continua só notificando o Jurídico com o motivo (já feito).
 
 **⚠️ Esta fase DÁ CIÊNCIA (inicia o prazo). Salvaguardas obrigatórias:**
+
 - Só para **individual + ativo** (a decisão já é calculada em `notify._decisao_individual`).
 - **Atrás de um comando/flag separado** (ex.: `monitor tratar` ou `run --tratar`) — **nunca**
   no `run` padrão de produção, para não ligar ciência por acidente.
 - `dry-run` da tratativa (mostra o que faria, sem abrir/enviar) antes de ligar em prod.
 
 **Passo a passo técnico:**
+
 1. Filtrar as intimações novas que são individual + cliente ativo.
 2. Abrir a intimação/processo (`processo_acesso_externo_consulta.php`) → **dá ciência**.
 3. Ler a **data de vencimento** do prazo (só existe após a ciência).
@@ -155,6 +158,7 @@ Individual **não-ativo/fora da base** → continua só notificando o Jurídico 
    e/ou lista Jurídico no SharePoint) e notificar o time.
 
 ### Decisões travadas (2026-07-16)
+
 - **Ciência automática** na Etapa 1 (o bot abre e dá ciência sozinho p/ individual ativo).
 - **Envio de e-mail em 2 etapas:** Etapa 1 = **criar rascunho + notificar o Teams p/ validação**
   (humano envia); Etapa 2 (depois) = envio direto via **fluxo Power Automate**.
@@ -163,6 +167,7 @@ Individual **não-ativo/fora da base** → continua só notificando o Jurídico 
 - **Tudo reportado no Teams** (processo, o que foi feito, prazo, para quem foi o e-mail).
 
 ### Achados da exploração (usando processos JÁ CUMPRIDOS — regra: só abrir Situação != Pendente)
+
 - **Página do processo** = `processo_acesso_externo_consulta.php?id_acesso_externo=<ID>&infra_hash=<sessão>`
   (título "Acesso Externo com Disponibilização Parcial de Documentos"). Tem cabeçalho
   (Processo, Tipo, Interessados), botões **Gerar PDF / Gerar ZIP / Peticionamento Intercorrente**,
@@ -182,6 +187,7 @@ Individual **não-ativo/fora da base** → continua só notificando o Jurídico 
 - Fixtures reais (`processo_detalhe.*`, `oficio_doc.*`) são gitignored.
 
 ### Mecânica da tratativa — VALIDADA ao vivo (2026-07-16, em processos já cumpridos)
+
 - **Reaproveitamento de sessão** (`seibot/sessao.py`): `abrir(cfg, permitir_login)` reusa os
   cookies salvos enquanto a sessão do SEI está viva (evita 2FA a cada passo). Só p/ dev/
   multi-passos; produção continua com login novo por execução. (SEI expira a sessão rápido,
@@ -200,6 +206,7 @@ Individual **não-ativo/fora da base** → continua só notificando o Jurídico 
   Ofício sem `(SEI nº …)` ⇒ sem anexos.
 
 ### Progresso (branch `fase-2-tratativa-individual`)
+
 - ✅ **Increment 1**: `seibot/tratativa.py` (`selecionar_candidatos`) + comando `monitor tratar`
   em MODO ENSAIO (só lista, não abre). `test_tratativa.py`.
 - ✅ **Sessão**: `seibot/sessao.py` (reaproveitamento).
@@ -235,8 +242,7 @@ ponta a ponta. O que se aprendeu:
 
 **2. A tela de consentimento.** Na linha de cada documento da intimação há um ícone
 `intimacao_nao_cumprida_doc_principal|doc_anexo.svg` com
-`onclick="infraAbrirJanelaModal('…acao=md_pet_intimacao_usu_ext_confirmar_aceite
-&id_acesso_externo=…&id_documento=…&id_intimacao[]=…&infra_hash=…', 900, 470)"`.
+`onclick="infraAbrirJanelaModal('…acao=md_pet_intimacao_usu_ext_confirmar_aceite &id_acesso_externo=…&id_documento=…&id_intimacao[]=…&infra_hash=…', 900, 470)"`.
 A tela explica o aceite e traz **`#sbmAceitarIntimacao`** ("Confirmar Consulta à Intimação")
 e `#sbmFechar`. Confirmar **um** documento cumpre a intimação inteira (mesmo `id_intimacao[]`).
 Texto útil: *"considerar-se-á cumprida a intimação com a presente consulta … ou, não efetuada
@@ -349,8 +355,7 @@ PDF devolve cru, senão renderiza a página via `page.pdf()` (headless), igual a
 
 - ⚠️ **Requer `HEADLESS=true`** (page.pdf() só roda headless) — produção já é headless.
 - ⚠️ **O rascunho da SITELBRA (e qualquer outro criado antes de 22/07) NÃO foi corrigido em
-  retrospecto** — os PDFs quebrados seguem na caixa do Jurídico. Regerar: `monitor tratar
-  --modo completo --processo 53500.064050/2024-26` (já cumprida → sem ciência) cria um novo
+  retrospecto** — os PDFs quebrados seguem na caixa do Jurídico. Regerar: `monitor tratar --modo completo --processo 53500.064050/2024-26` (já cumprida → sem ciência) cria um novo
   rascunho com os PDFs certos; apagar o antigo à mão.
 - **Nuance de contagem de anexos** (não é bug, é decisão pendente): o texto do ofício dizia
   "Anexo: Despacho Decisório" (1 só), mas a intimação eletrônica do SEI empacotou 4 docs
@@ -358,12 +363,53 @@ PDF devolve cru, senão renderiza a página via `page.pdf()` (headless), igual a
   = `docs_intimacao`), então mandou os 3. Se o Jurídico quiser restringir ao que o texto
   chama de "Anexo", é outra regra — decidir com eles.
 
+### Card do ofício no Kanban do Jurídico (feature 2026-07-22)
+
+Ao final de cada tratativa (quando cria o rascunho), o bot também cria um **card** na lista
+**"Jurídico - Controle de Ofício"** (`ControleOficioJuridico`, id
+`407dc958-8ac3-4224-9026-d0759149a235`, site Gestão Integrada). É a lista do Kanban que o
+time do Jurídico usa; as raias do board = o campo `StatusOficio`.
+
+- **`seibot/oficio_card.py`**: `montar_campos` (puro) + `criar_card` (idempotente por Nº do
+  Processo — não duplica se já existe; seguro re-rodar `--modo completo`).
+- **O que o bot preenche**: `Title` (nº processo), `NumeroOficio` (`Ofício N (docid)`),
+  `CNPJ` (lookup → Clientes SCM, via `CNPJLookupId`) + `CNPJsemFormatacao`, `DataCumprimento`
+  (dia da ciência), `DataVencimento` (prazo), `Email`, `Telefone`, **`Prioridade`**
+  (URGENTE→`Alta`, senão `Média`) e **`Pacote`** (tier do contrato ativo).
+- **O que fica EM BRANCO de propósito** (Jurídico edita conforme conduz): `StatusOficio`,
+  `TipoOficio` (não mapeava 1:1 com os tipos do SEI), `LoginSEI`/`SenhaSEI`, insumos do AGU.
+  ⚠️ **`DataAGUfim` é coluna CALCULADA (read-only)** — o bot NÃO a toca; ela exibe
+  `30/12/1899` em todo item sem AGU (inclusive os manuais). Só muda na fórmula da coluna.
+- **CNPJ é lookup** para a lista **Clientes SCM** (confirmado ao vivo: item 3539 = CNPJ do
+  card). O id vem de `clientes.ClienteInfo.sp_item_id` (novo); telefones vêm de `field_4`/
+  `TelefoneFinanceiro`/`TelefoneTecnico`/`TelefoneAdm` (`ClienteInfo.telefones`, novo).
+- **`Pacote`**: vem do campo **`Servicos`** (multi-choice) da lista **Comercial** — o tier do
+  contrato **ativo** (`clientes.ClienteInfo.pacote`, via `_melhor_pacote`). Com >1 tier (~5%
+  dos clientes), prefere conectividade (`BLACK>ULTRA>FLEX>LIGHT`); `JURÍDICO` só se não houver
+  outro. ⚠️ **Ranking é palpite** — ajustar `_TIERS_RANK` se o Jurídico definir diferente.
+  ⚠️ `Pacote` é **multi-choice** no SEI → grava-se **lista** + `"Pacote@odata.type":
+  "Collection(Edm.String)"` (sem a anotação o Graph dá 500/400).
+- **Comentário de proveniência** (pedido do usuário, padrão CREA/CFT): `seibot/comentarios.py`
+  posta *"[Automação Jurídico] 🤖 Card criado automaticamente…"* no card. Comentário de item
+  **não existe no Graph** — é **SharePoint REST** (`_api/web/lists(...)/items(id)/Comments`) e
+  **delegado** (autor = usuário; app-only dá 401). **Reaproveita o refresh token do
+  `teams_dm`** (`state/.graph_token.json`) redimido p/ o escopo SharePoint `AllSites.Write`
+  (validado 2026-07-22) — **um login device-code cobre DM de erro + comentário**. Best-effort
+  (cosmético; se falhar, só loga).
+- **`SharePointClientes.graph`** (novo) expõe o cliente Graph app-only p/ escrita; **Graph
+  escreve** via `graph.criar_item` (POST, novo). Comentário usa auth delegada à parte.
+- **Best-effort**: `tratativa._criar_card_best_effort` — falha ao criar o card **não** derruba
+  a tratativa (ciência + rascunho já concluídos); só loga e manda DM de erro (não-crítico).
+- **Validado ao vivo (2026-07-22)** no card da SITELBRA (item 34): `Pacote=['LIGHT']`,
+  `Prioridade='Média'`, lookup resolveu a Razão Social, datas/contatos OK, Status/Tipo em
+  branco, e comentário de automação postado e lido de volta. **104 testes.**
+
 ### ⚠️ Riscos conhecidos ao ligar (leia antes de armar `TRATAR_AUTO=true`)
+
 - **`processo.dar_ciencia()` nunca executou.** No pendente real a ciência foi dada pelo script
   de mapeamento (`ciencia.py`, descartável), não por essa função. Ela reproduz exatamente o
   que funcionou (mesma URL de modal, mesmo `#sbmAceitarIntimacao`, com guarda se o botão
-  sumir), mas o **primeiro uso em produção é o primeiro uso real do código**. O `--modo
-  completo` **não** cobre isso: ele passa `dar_ciencia=False` por construção.
+  sumir), mas o **primeiro uso em produção é o primeiro uso real do código**. O `--modo completo` **não** cobre isso: ele passa `dar_ciencia=False` por construção.
 - **`--modo real` como comando também nunca rodou** ponta a ponta (o laço de seleção +
   ciência). Só suas partes.
 - **Falha pós-ciência não tem retry** — por design (evita ciência dupla). Depende de humano

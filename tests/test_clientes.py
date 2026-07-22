@@ -72,3 +72,35 @@ def test_emails_agregados_de_varias_colunas():
     }])
     emails = sp.emails("11111111111111")
     assert emails == ["a@x.com", "b@x.com", "c@x.com"]
+
+
+def test_sp_item_id_e_telefones_para_o_card():
+    """O card do ofício precisa do id do cliente (alvo do lookup CNPJ) e dos telefones."""
+    sp = _sp([{
+        "id": "42", "Title": "11.111.111/1111-11", "StatusContrato": "Ativo",
+        "field_4": "(35) 99940-4274", "TelefoneFinanceiro": "(35) 99940-4274",
+        "TelefoneTecnico": "34 3333-1010",
+    }])
+    info = sp.info("11111111111111")
+    assert info.sp_item_id == "42"
+    # texto livre (não fragmentar) + dedup preservando ordem (Responsável == Financeiro)
+    assert info.telefones == ("(35) 99940-4274", "34 3333-1010")
+    assert sp.graph is not None   # cliente Graph exposto para escrita (card)
+
+
+def test_pacote_prefere_conectividade_sobre_juridico():
+    """Pacote do card = tier do contrato ATIVO; com >1 tier, conectividade > JURÍDICO."""
+    sp = _sp(
+        clientes_scm=[{"id": "1", "Title": "11.111.111/1111-11", "StatusContrato": "Ativo"}],
+        comercial=[{"CNPJLookupId": "1", "StatusContrato": "Ativo",
+                    "Servicos": ["FLEX", "JURÍDICO"]}],   # multi-choice → lista
+    )
+    assert sp.info("11111111111111").pacote == "FLEX"
+
+
+def test_pacote_ignora_tier_de_contrato_nao_ativo():
+    sp = _sp(
+        clientes_scm=[{"id": "1", "Title": "11.111.111/1111-11", "StatusContrato": "Ativo"}],
+        comercial=[{"CNPJLookupId": "1", "StatusContrato": "Cancelado", "Servicos": ["ULTRA"]}],
+    )
+    assert sp.info("11111111111111").pacote == ""   # só contrato cancelado → sem pacote

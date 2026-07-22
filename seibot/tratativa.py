@@ -36,7 +36,8 @@ def _nome_arquivo(base: str, num: str) -> str:
     return (s or f"doc_{num}") + ".pdf"
 
 
-def _msg_tratativa_html(grupo: Grupo, intim: Intimacao, prazo, emails, n_anexos, criou) -> str:
+def _msg_tratativa_html(grupo: Grupo, intim: Intimacao, prazo, emails, n_anexos, criou,
+                        card_criado: bool = False) -> str:
     linhas = [
         "📌 <b>Tratativa individual — SEI</b>",
         f"<b>Processo:</b> {grupo.processo}",
@@ -55,7 +56,51 @@ def _msg_tratativa_html(grupo: Grupo, intim: Intimacao, prazo, emails, n_anexos,
         linhas.append("👉 Revisar e enviar.")
     else:
         linhas.append("🧪 (ensaio — rascunho NÃO criado)")
+    if card_criado:
+        linhas.append("🗂️ <b>Card criado</b> no Controle de Ofício (Jurídico).")
     return "<br>".join(linhas)
+
+
+def _comentar_automacao(cfg, card_id: str, grupo: Grupo, log) -> None:
+    """Comenta no card que ele foi gerado pela automação (padrão CREA/CFT). Cosmético e
+    best-effort: se falhar (sem login delegado, token expirado…), só loga — o card já existe.
+    Usa SharePoint REST com auth delegada (o mesmo login device-code do teams_dm)."""
+    try:
+        from . import comentarios, oficio_card
+        comentarios.postar_comentario(cfg, oficio_card.LISTA_CONTROLE_OFICIO, card_id,
+                                      comentarios.texto_card(grupo))
+        log("   ✓ comentário de automação postado no card")
+    except Exception as e:  # noqa: BLE001 — comentário é só proveniência; não é crítico
+        log(f"   ⚠️ card criado, mas falhou o comentário de automação: {e}")
+
+
+def _criar_card_best_effort(cfg, clientes, grupo, intim, prazo, log) -> Optional[str]:
+    """Cria o card do ofício no SharePoint. **Best-effort**: qualquer falha aqui NÃO derruba
+    a tratativa (ciência + rascunho já concluídos) — só loga e avisa o responsável técnico.
+
+    Precisa de um cliente Graph que ESCREVA; só a SharePointClientes expõe `.graph`. Sem ele
+    (ex.: fake nos testes, ou Fase 1 sem SharePoint) simplesmente não cria card."""
+    from datetime import date
+
+    g = getattr(clientes, "graph", None)
+    if g is None:
+        return None
+    try:
+        from . import oficio_card
+        info = clientes.info(intim.documento) if clientes else None
+        cid = oficio_card.criar_card(g, grupo, intim, prazo, info,
+                                     data_cumprimento=date.today(), log=log)
+        if cid:
+            _comentar_automacao(cfg, cid, grupo, log)
+        return cid
+    except Exception as e:  # noqa: BLE001 — card é registro de gestão, não pode quebrar a tratativa
+        log(f"   ⚠️ falha ao criar card no Controle de Ofício: {e}")
+        from .erros import notificar_erro
+        notificar_erro(cfg, f"card ofício · {grupo.processo}", e,
+                       detalhe=(f"<b>Empresa:</b> {intim.destinatario}<br>"
+                                "Ciência e rascunho OK; só o card no SharePoint falhou. "
+                                "Criar/conferir à mão se necessário."))
+        return None
 
 
 def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, *,
@@ -168,16 +213,22 @@ def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
         rascunho.criar_rascunho(cfg.powerautomate_rascunho_url, msg)
         log("   ✓ rascunho criado na caixa do Jurídico")
 
+    # Card no Kanban do Jurídico (ControleOficioJuridico) — ao final da tratativa. Best-effort:
+    # falha aqui não é crítica (a ciência e o rascunho já foram concluídos acima).
+    card_id = _criar_card_best_effort(cfg, clientes, grupo, intim, prazo, log) if criar_rascunho else None
+
     if url_teams:
         enviar_teams_webhook(
             url_teams,
-            _msg_tratativa_html(grupo, intim, prazo, emails, len(anexos), criar_rascunho),
+            _msg_tratativa_html(grupo, intim, prazo, emails, len(anexos), criar_rascunho,
+                                card_criado=bool(card_id)),
             "text")
 
     store.marcar_tratado(intim, prazo.data_limite if prazo else "")
     return {"processo": grupo.processo, "empresa": intim.destinatario,
             "prazo": prazo.data_limite if prazo else None,
-            "emails": emails, "anexos": len(anexos), "rascunho": criar_rascunho}
+            "emails": emails, "anexos": len(anexos), "rascunho": criar_rascunho,
+            "card": card_id}
 
 
 def eh_candidato(g: Grupo, clientes: Optional[BaseClientes]) -> bool:

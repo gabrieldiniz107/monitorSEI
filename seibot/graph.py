@@ -68,6 +68,36 @@ class GraphSharePoint:
                 time.sleep(2 ** (tentativa - 1))  # 1s, 2s, 4s
         raise GraphError(f"GET {url} falhou após {_MAX_TENTATIVAS} tentativas: {ultimo_erro}")
 
+    def _post(self, url: str, json_body: dict, headers: dict | None = None) -> dict:
+        """POST com retry/backoff em erros transitórios (429/5xx/timeout de rede).
+
+        A criação de item é atômica no Graph: um 5xx significa (quase sempre) que nada foi
+        gravado, então retentar é seguro. Como salvaguarda extra, quem cria o card checa a
+        existência por Título antes (idempotente) — ver oficio_card.criar_card."""
+        ultimo_erro = None
+        for tentativa in range(1, _MAX_TENTATIVAS + 1):
+            try:
+                r = self._http.post(
+                    url, json=json_body,
+                    headers=self._hdr({"Content-Type": "application/json", **(headers or {})}))
+            except httpx.HTTPError as e:
+                ultimo_erro = e
+            else:
+                if r.status_code < 400:
+                    return r.json()
+                if r.status_code not in _RETRY_STATUS:
+                    raise GraphError(f"POST {url} -> {r.status_code}: {r.text[:400]}")
+                ultimo_erro = GraphError(f"POST {url} -> {r.status_code}: {r.text[:200]}")
+            if tentativa < _MAX_TENTATIVAS:
+                time.sleep(2 ** (tentativa - 1))
+        raise GraphError(f"POST {url} falhou após {_MAX_TENTATIVAS} tentativas: {ultimo_erro}")
+
+    def criar_item(self, lista_id: str, fields: dict) -> dict:
+        """Cria um item na lista (POST). `fields` são os nomes INTERNOS das colunas
+        (ex. Title, NumeroOficio, CNPJLookupId). Devolve o item criado (com `id`)."""
+        url = f"{GRAPH}/sites/{self.site_id}/lists/{lista_id}/items"
+        return self._post(url, {"fields": fields})
+
     def listas(self) -> list[dict]:
         url = f"{GRAPH}/sites/{self.site_id}/lists"
         data = self._get(url, params={"$select": "id,name,displayName,webUrl"})
