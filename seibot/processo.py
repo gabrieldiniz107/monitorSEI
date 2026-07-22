@@ -34,8 +34,14 @@ from typing import Optional
 BASE = "https://sei.anatel.gov.br/sei/"
 
 _ANEXO_RE = re.compile(r"\(\s*SEI\s*n[^\d]{0,6}(\d{5,})", re.I)
+# A unidade pode vir com qualificador: "(15 Dias)", "(20 Dias Úteis)", "(30 Dias Corridos)".
+# `unidade` captura "Dias"/"Dias Úteis"/etc. — dia útil ≠ dia corrido importa juridicamente,
+# então preservamos o rótulo em vez de assumir "dias". (Bug 2026-07-22: a Cobrança de Crédito
+# Tributário da Maxxnet usava "20 Dias Úteis" e o regex antigo, preso em "Dias)", devolvia None
+# → o bot dizia "sem prazo de resposta" mesmo com Data Limite legível no #selTipoResposta.)
 _PRAZO_RE = re.compile(
-    r"(?P<tipo>.+?)\(\s*(?P<dias>\d+)\s*Dias?\s*\)\s*-\s*Data\s*Limite:\s*(?P<data>\d{2}/\d{2}/\d{4})",
+    r"(?P<tipo>.+?)\(\s*(?P<dias>\d+)\s*(?P<unidade>Dias?(?:\s+[^\s)]+)?)\s*\)"
+    r"\s*-\s*Data\s*Limite:\s*(?P<data>\d{2}/\d{2}/\d{4})",
     re.I,
 )
 
@@ -86,18 +92,21 @@ def anexos_da_intimacao(protocolos: dict, doc_id_oficio: str,
 
 @dataclass(frozen=True)
 class Prazo:
-    tipo: str          # ex. "Defesa Preliminar"
-    dias: int          # ex. 15
-    data_limite: str   # ex. "30/07/2026"
+    tipo: str            # ex. "Defesa Preliminar"
+    dias: int            # ex. 15
+    data_limite: str     # ex. "30/07/2026"
+    unidade: str = "dias"  # ex. "dias" / "dias úteis" — dia útil ≠ dia corrido
 
 
 def parse_prazo(opcao: str) -> Optional[Prazo]:
     """Extrai o prazo do texto de uma opção do #selTipoResposta.
-    Ex.: 'Defesa Preliminar (15 Dias) - Data Limite: 30/07/2026'."""
+    Ex.: 'Defesa Preliminar (15 Dias) - Data Limite: 30/07/2026'
+      ou 'Impugnação (20 Dias Úteis) - Data Limite: 19/08/2026'."""
     m = _PRAZO_RE.search(opcao or "")
     if not m:
         return None
-    return Prazo(tipo=m.group("tipo").strip(" -– "),
+    unidade = re.sub(r"\s+", " ", m.group("unidade")).strip().lower() or "dias"
+    return Prazo(unidade=unidade, tipo=m.group("tipo").strip(" -– "),
                 dias=int(m.group("dias")), data_limite=m.group("data"))
 
 
@@ -252,6 +261,39 @@ def oficio_pdf(page, oficio_url: str) -> bytes:
 _PDF_MAGIC = b"%PDF"
 
 
+def eh_pdf(bruto: bytes) -> bool:
+    """True se os bytes já são um PDF (magic number). Documentos gerados no SEI vêm em HTML;
+    documentos externos (upload/print) e algumas Notificações vêm como PDF de verdade."""
+    return bruto[:4] == _PDF_MAGIC
+
+
+def _pdf_para_texto(pdf_bytes: bytes) -> str:
+    """Texto de um PDF via pypdf. '' se não der para extrair (nunca levanta)."""
+    import io
+
+    import pypdf
+    try:
+        r = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        return "\n".join((p.extract_text() or "") for p in r.pages).strip()
+    except Exception:
+        return ""
+
+
+def extrair_texto_oficio(bruto: bytes, *, pdf_extractor=_pdf_para_texto) -> str:
+    """Texto do ofício (para o resumo LLM e para `extrair_anexos`), escolhendo o decodificador
+    certo pelo conteúdo.
+
+    - Ofício **gerado no SEI** vem como **HTML** (ISO-8859-1) → decodifica; o resumo tira as tags.
+    - Ofício **servido como PDF** (ex.: Notificação de Lançamento — upload/print externo) precisa
+      de **pypdf**. Decodificar o binário do PDF como ISO-8859-1 alimentaria o LLM com lixo — foi
+      o que aconteceu no rascunho da Maxxnet (proc 53524.000048/2026-12, doc 16003317, 2026-07-22):
+      resumo genérico/inventado a partir de bytes de PDF. `pdf_extractor` é injetável (testes).
+    """
+    if eh_pdf(bruto):
+        return pdf_extractor(bruto)
+    return bruto.decode("iso-8859-1", errors="replace")
+
+
 def baixar_como_pdf(page, context, url: str) -> bytes:
     """Baixa um documento da intimação e devolve SEMPRE um PDF abrível.
 
@@ -267,7 +309,7 @@ def baixar_como_pdf(page, context, url: str) -> bytes:
     SEI) renderiza a página via Chromium (`page.pdf`, só headless), igual ao ofício.
     """
     bruto = baixar(context, url)
-    if bruto[:4] == _PDF_MAGIC:
+    if eh_pdf(bruto):
         return bruto
     return oficio_pdf(page, url)
 

@@ -363,6 +363,67 @@ PDF devolve cru, senão renderiza a página via `page.pdf()` (headless), igual a
   = `docs_intimacao`), então mandou os 3. Se o Jurídico quiser restringir ao que o texto
   chama de "Anexo", é outra regra — decidir com eles.
 
+### Prazo "Dias Úteis" não era parseado → "sem prazo de resposta" (correção 2026-07-22)
+
+Rascunho da **Maxxnet** (proc `53524.000048/2026-12`, Notificação de Lançamento 16003317,
+**Cobrança de Crédito Tributário**) saiu com **"Prazo: — (sem prazo de resposta)"** no Teams,
+no e-mail e no card — mas o prazo EXISTIA e estava legível.
+
+Causa: `#selTipoResposta` trazia `"Impugnação (20 Dias Úteis) - Data Limite: 19/08/2026"`
+(prazo em **dias ÚTEIS**, típico de matéria tributária), mas o `_PRAZO_RE` estava preso em
+`(N Dias)` — o token `Dias?\s*\)` não casava com `Dias Úteis)` → `parse_prazo` devolvia
+`None` → `capturar_prazo` seguia para a próxima opção (só havia a vazia) → prazo `None`.
+(Confirmado ao vivo: a intimação já cumprida foi reaberta e o select lido — a opção estava
+lá; a tela que o usuário printou parecia "vazia" só porque o `<select>` mostra a 1ª opção
+em branco quando fechado.)
+
+Fix em `processo.py`: `_PRAZO_RE` ganhou `(?P<unidade>Dias?(?:\s+[^\s)]+)?)` — casa
+`Dias`, `Dias Úteis`, `Dias Corridos`, `Dia Útil`. `Prazo` ganhou o campo **`unidade`**
+(default `"dias"`, retrocompatível) e a preserva: dia útil ≠ dia corrido importa
+juridicamente. Teams/e-mail agora mostram `20 dias úteis` em vez de `20 dias`. **107 testes**
+(regressão em `test_parse_prazo_dias_uteis`).
+
+- ⚠️ O rascunho + card da Maxxnet criados ANTES do fix **não** se autocorrigem. **Atenção:
+  `--modo completo` NÃO serve aqui** — este processo tem 2 intimações e o comando pega a
+  errada (ver os "3 achados" abaixo); os rascunhos certos foram refeitos por script pontual
+  (por `doc_id`). O **card** é idempotente por Nº do Processo, então re-rodar **não** atualiza
+  o `DataVencimento` em branco — editar à mão ou apagar o card antes de re-rodar.
+- ⚠️ Produção roda **da imagem** → `docker compose build` na VPS antes do próximo cron, senão
+  o container segue com o regex velho (mesma pegadinha do `docker-compose.yml` só montar `./state`).
+
+### Mais 3 achados no mesmo processo da Maxxnet ao refazer o rascunho (correção 2026-07-22)
+
+Ao regerar o rascunho da Maxxnet, o proc `53524.000048/2026-12` revelou 3 armadilhas:
+
+**1. Processo com MAIS DE UMA intimação.** Esse processo tem **duas** Notificações de
+Lançamento (Cobrança de Crédito Tributário): `16003317` (nº 001-005083, FUST **2023**) e
+`16003331` (nº 001-005107, FUST **2024**), cada uma com seu Extrato de Lançamentos anexo
+(`15989680` 2023 · `15989702` 2024). O comando **`tratar --modo completo/real` casa por
+`x.processo == processo_alvo` e pega o PRIMEIRO grupo** → em processo multi-intimação abre a
+intimação errada. ⚠️ **Bug em aberto**: `--processo` não desambigua; para alvejar uma
+intimação específica seria preciso casar por `doc_id`. Por ora, num processo multi-intimação,
+o `--modo completo` não é confiável — foi feito um script pontual por `doc_id`.
+
+**2. Ofício SERVIDO COMO PDF vira resumo-lixo (CORRIGIDO).** A Notificação de Lançamento é
+entregue por `documento_consulta_externa.php` como **PDF de verdade** (`%PDF`, print externo),
+não HTML. O `_tratar_apos_ciencia` decodificava tudo como ISO-8859-1 → o LLM resumia **bytes
+binários** (resumo genérico/inventado). Fix: **`processo.extrair_texto_oficio(bytes)`** —
+`%PDF` → extrai via **pypdf** (nova dep); senão decodifica HTML como antes. E o **anexo do
+próprio ofício** agora usa os bytes crus quando já é PDF (antes `oficio_pdf()` re-renderizava
+um PDF já-PDF pela impressora do Chromium). `eh_pdf()` centraliza a detecção. **110 testes**
+(`test_extrair_texto_oficio_*`). Validado ao vivo: resumo passou a citar o valor real
+(R$ 6.414,70) e os fatos do Fust. ⚠️ **Precisa `docker compose build`** (nova dep pypdf).
+
+**3. Anexo não é recuperável depois da ciência.** Em processo já **cumprido** os ícones de
+aceite sumiram e estes ofícios **não citam `(SEI nº …)`** no texto → `anexos_da_intimacao`
+devolve **0**. Ao refazer um rascunho de intimação já cumprida, o anexo tem de ser **apontado
+à mão** (o par Notificação↔Extrato do mesmo exercício). Reforça o que já estava dito: só dá
+para pegar o anexo automaticamente ANTES da ciência (via ícones de aceite).
+
+Rascunhos corretos recriados (script pontual, por `doc_id`, sem ciência): 16003317 (Extrato
+2023) e 16003331 (Extrato 2024), ambos prazo 19/08/2026, ofício+extrato, resumo do PDF real.
+Os rascunhos velhos/errados no `juridico@` foram deixados para apagar à mão.
+
 ### Card do ofício no Kanban do Jurídico (feature 2026-07-22)
 
 Ao final de cada tratativa (quando cria o rascunho), o bot também cria um **card** na lista

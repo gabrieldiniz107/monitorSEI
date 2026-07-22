@@ -1,5 +1,6 @@
 """Testes dos parsers puros do Increment 3 (anexos + prazo)."""
-from seibot.processo import Prazo, anexos_da_intimacao, extrair_anexos, parse_prazo
+from seibot.processo import (Prazo, anexos_da_intimacao, eh_pdf, extrair_anexos,
+                             extrair_texto_oficio, parse_prazo)
 
 # Lista de Protocolos REAL do proc 53508.003179/2026-50 (após a ciência, 2026-07-20)
 _PROTOCOLOS = {
@@ -86,6 +87,29 @@ def test_anexos_nao_repetem():
     assert extrair_anexos(html) == ["15963829", "15963779"]
 
 
+# --- ofício HTML vs PDF (correção 2026-07-22, rascunho da Maxxnet 16003317) -------------
+def test_eh_pdf_detecta_magic_number():
+    assert eh_pdf(b"%PDF-1.4\n...") is True
+    assert eh_pdf(b"<html>Of\xedcio</html>") is False
+
+
+def test_extrair_texto_oficio_html_decodifica_iso8859():
+    # ofício gerado no SEI: HTML ISO-8859-1 (0xed = í) → decodifica, sem chamar pypdf
+    html = "<p>Of\xedcio 70 requerimento</p>".encode("iso-8859-1")
+    def _nao_deveria(_):  # pdf_extractor não pode ser chamado p/ HTML
+        raise AssertionError("pdf_extractor chamado para HTML")
+    txt = extrair_texto_oficio(html, pdf_extractor=_nao_deveria)
+    assert "Ofício 70" in txt
+
+
+def test_extrair_texto_oficio_pdf_usa_extrator():
+    # ofício servido como PDF (Notificação de Lançamento): roteia para o extrator de PDF,
+    # NÃO decodifica o binário como texto (era o bug que gerava resumo-lixo).
+    pdf = b"%PDF-1.4 conteudo binario \xff\xfe"
+    txt = extrair_texto_oficio(pdf, pdf_extractor=lambda b: "TEXTO DO PDF")
+    assert txt == "TEXTO DO PDF"
+
+
 def test_parse_prazo_defesa_preliminar():
     p = parse_prazo("Defesa Preliminar (15 Dias) - Data Limite: 30/07/2026")
     assert p == Prazo(tipo="Defesa Preliminar", dias=15, data_limite="30/07/2026")
@@ -94,6 +118,26 @@ def test_parse_prazo_defesa_preliminar():
 def test_parse_prazo_variacao_espacos():
     p = parse_prazo("Manifestação  ( 10 Dias ) - Data Limite:  05/08/2026")
     assert p.dias == 10 and p.data_limite == "05/08/2026"
+
+
+def test_parse_prazo_dias_uteis():
+    # Regressão (2026-07-22, Cobrança de Crédito Tributário da Maxxnet): o regex antigo,
+    # preso em "Dias)", devolvia None p/ "20 Dias Úteis" → bot dizia "sem prazo de resposta"
+    # apesar de a Data Limite estar legível no #selTipoResposta.
+    p = parse_prazo("Impugnação (20 Dias Úteis) - Data Limite: 19/08/2026")
+    assert p == Prazo(tipo="Impugnação", dias=20, data_limite="19/08/2026",
+                      unidade="dias úteis")
+
+
+def test_parse_prazo_dias_corridos_e_singular():
+    assert parse_prazo("Recurso (10 Dias Corridos) - Data Limite: 01/09/2026").unidade == "dias corridos"
+    assert parse_prazo("X (1 Dia Útil) - Data Limite: 23/07/2026").unidade == "dia útil"
+
+
+def test_parse_prazo_dias_simples_unidade_padrao():
+    # sem qualificador, unidade continua "dias" (compatível com a construção antiga do Prazo)
+    p = parse_prazo("Defesa (15 Dias) - Data Limite: 30/07/2026")
+    assert p.unidade == "dias" and p == Prazo(tipo="Defesa", dias=15, data_limite="30/07/2026")
 
 
 def test_parse_prazo_sem_prazo_retorna_none():

@@ -41,7 +41,7 @@ def montar_corpo_html(
     if prazo is not None:
         linhas.append(
             f"<p><b>Prazo:</b> resposta até <b>{e(prazo.data_limite)}</b> "
-            f"({e(prazo.tipo)}, {prazo.dias} dias).</p>"
+            f"({e(prazo.tipo)}, {prazo.dias} {e(prazo.unidade)}).</p>"
         )
     docs = "o ofício e os documentos relacionados" if tem_anexos else "o ofício"
     linhas.append(

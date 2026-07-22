@@ -46,7 +46,7 @@ def _msg_tratativa_html(grupo: Grupo, intim: Intimacao, prazo, emails, n_anexos,
         f"<b>Tipo:</b> {grupo.tipo_intimacao}",
     ]
     if prazo is not None:
-        linhas.append(f"<b>Prazo:</b> {prazo.data_limite} ({prazo.tipo}, {prazo.dias} dias)")
+        linhas.append(f"<b>Prazo:</b> {prazo.data_limite} ({prazo.tipo}, {prazo.dias} {prazo.unidade})")
     else:
         linhas.append("<b>Prazo:</b> — (sem prazo de resposta)")
     linhas.append(f"<b>Documentos:</b> ofício + {n_anexos} anexo(s)")
@@ -174,7 +174,10 @@ def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
     of = protos.get(grupo.doc_id)
     if not of:
         raise RuntimeError(f"ofício {grupo.doc_id} não achado na Lista de Protocolos")
-    oficio_texto = processo.baixar(ctx, of["url"]).decode("iso-8859-1", errors="replace")
+    of_bytes = processo.baixar(ctx, of["url"])
+    # ofício gerado no SEI = HTML; Notificação de Lançamento & afins = PDF de verdade. Extrair
+    # o texto pelo conteúdo (senão o resumo LLM recebe binário) — ver processo.extrair_texto_oficio.
+    oficio_texto = processo.extrair_texto_oficio(of_bytes)
 
     # anexos: só os documentos DA INTIMAÇÃO (ícones de aceite), nunca o processo inteiro
     citados = processo.extrair_anexos(oficio_texto)
@@ -194,7 +197,8 @@ def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
                            processo.baixar_como_pdf(page, ctx, p["url"])))
             descr_anexos.append(f"{p['tipo']} (SEI nº {num})")
 
-    of_pdf = processo.oficio_pdf(page, of["url"])
+    # se o ofício já é PDF, anexa os bytes crus; se é HTML gerado no SEI, renderiza via Chromium.
+    of_pdf = of_bytes if processo.eh_pdf(of_bytes) else processo.oficio_pdf(page, of["url"])
     log(f"   ofício PDF: {len(of_pdf)} bytes | anexos: {len(anexos)}")
 
     resumo_txt = resumo.resumir(oficio_texto, cfg, anexos=descr_anexos or None)
