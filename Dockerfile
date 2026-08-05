@@ -9,7 +9,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY seibot/ ./seibot/
-COPY validar_login.py capturar_html.py ./
+# scripts avulsos da raiz. ⚠️ Só o que está listado aqui existe dentro da imagem — o
+# docker-compose.yml monta apenas ./state, então um .py novo na raiz do repo NÃO aparece
+# no container até ser adicionado nesta linha (+ rebuild).
+COPY validar_login.py capturar_html.py backfill_prazos.py ./
 
 # execução efêmera (o cron do host chama `docker compose run --rm ...`)
 CMD ["python", "-m", "seibot.monitor", "run"]
