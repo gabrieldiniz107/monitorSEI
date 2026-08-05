@@ -96,8 +96,9 @@ Graph app-only, app "SCM VISTORIAS", `Sites.ReadWrite.All`; credenciais `GRAPH_*
 python -m seibot.monitor dry-run    # mostra o que enviaria (sem banco/Teams)
 python -m seibot.monitor baseline   # marca os recentes como vistos (1x no deploy)
 python -m seibot.monitor run        # detecta novos e notifica no Teams
+python -m seibot.monitor tratar --modo completo --doc-id 16067648   # alveja UMA intimação
 python validar_login.py             # valida só o login (teste do Turnstile headless)
-pytest -q                           # 29 testes (parser/classificar/store/notify/monitor/clientes)
+pytest -q                           # 139 testes (parser/classificar/store/notify/monitor/clientes/…)
 ```
 
 Parser e classificador são **puros** (testáveis sem browser). A fixture real
@@ -130,6 +131,10 @@ Execução **efêmera** (não é daemon — não aparece no `docker ps` fora dos
   se voltar a variar a contagem de clientes, revisar.
 - Cobertura do `run`: raspa só a 1ª página (100). Se em 6h chegarem >100 intimações novas,
   o excedente não é visto (há um aviso no log). Improvável, mas monitorar.
+- ~~**Bug em aberto — processo com múltiplas intimações**~~ **CORRIGIDO (2026-08-05)**:
+  `tratar --modo completo` ganhou **`--doc-id`**, que casa pelo id do documento em vez do nº do
+  processo. Sem ele, um processo com >1 intimação abria a errada (Maxxnet
+  `53524.000048/2026-12`, 2 Notificações de Lançamento).
 
 ---
 
@@ -383,13 +388,15 @@ Fix em `processo.py`: `_PRAZO_RE` ganhou `(?P<unidade>Dias?(?:\s+[^\s)]+)?)` —
 juridicamente. Teams/e-mail agora mostram `20 dias úteis` em vez de `20 dias`. **107 testes**
 (regressão em `test_parse_prazo_dias_uteis`).
 
-- ⚠️ O rascunho + card da Maxxnet criados ANTES do fix **não** se autocorrigem. **Atenção:
-  `--modo completo` NÃO serve aqui** — este processo tem 2 intimações e o comando pega a
-  errada (ver os "3 achados" abaixo); os rascunhos certos foram refeitos por script pontual
-  (por `doc_id`). O **card** é idempotente por Nº do Processo, então re-rodar **não** atualiza
-  o `DataVencimento` em branco — editar à mão ou apagar o card antes de re-rodar.
-- ⚠️ Produção roda **da imagem** → `docker compose build` na VPS antes do próximo cron, senão
-  o container segue com o regex velho (mesma pegadinha do `docker-compose.yml` só montar `./state`).
+- O rascunho + card da Maxxnet criados ANTES do fix **não** se autocorrigem — foram remediados
+  à mão (rascunhos refeitos por script pontual; card corrigido via PATCH da `DataVencimento`,
+  ver os "3 achados" abaixo). **Atenção:** `--modo completo` NÃO servia para regerar aqui —
+  este processo tem 2 intimações e o comando pega a errada. O **card** é idempotente por Nº do
+  Processo, então re-rodar **não** atualizaria o `DataVencimento` em branco de qualquer forma.
+- ✅ **Em produção (2026-07-22):** commit deployado na VPS e `docker compose build` feito — o
+  container já roda com o regex novo (e o pypdf, ver "3 achados"). Lembrete permanente: como
+  produção roda **da imagem** (`docker-compose.yml` só monta `./state`), toda mudança de código
+  exige rebuild antes do próximo cron.
 
 ### Mais 3 achados no mesmo processo da Maxxnet ao refazer o rascunho (correção 2026-07-22)
 
@@ -412,7 +419,8 @@ binários** (resumo genérico/inventado). Fix: **`processo.extrair_texto_oficio(
 próprio ofício** agora usa os bytes crus quando já é PDF (antes `oficio_pdf()` re-renderizava
 um PDF já-PDF pela impressora do Chromium). `eh_pdf()` centraliza a detecção. **110 testes**
 (`test_extrair_texto_oficio_*`). Validado ao vivo: resumo passou a citar o valor real
-(R$ 6.414,70) e os fatos do Fust. ⚠️ **Precisa `docker compose build`** (nova dep pypdf).
+(R$ 6.414,70) e os fatos do Fust. ✅ Já em produção — a nova dep **pypdf** entrou no
+`requirements.txt` e o `docker compose build` foi feito na VPS (2026-07-22).
 
 **3. Anexo não é recuperável depois da ciência.** Em processo já **cumprido** os ícones de
 aceite sumiram e estes ofícios **não citam `(SEI nº …)`** no texto → `anexos_da_intimacao`
@@ -422,7 +430,70 @@ para pegar o anexo automaticamente ANTES da ciência (via ícones de aceite).
 
 Rascunhos corretos recriados (script pontual, por `doc_id`, sem ciência): 16003317 (Extrato
 2023) e 16003331 (Extrato 2024), ambos prazo 19/08/2026, ofício+extrato, resumo do PDF real.
-Os rascunhos velhos/errados no `juridico@` foram deixados para apagar à mão.
+Os rascunhos velhos/errados no `juridico@` foram deixados para apagar à mão. O **card** do
+processo (id 35, ofício 16003317) foi corrigido via PATCH cirúrgico: `DataVencimento`=19/08/2026
+(a coluna calculada `PrazoOficio` recalculou p/ 28 dias); os demais campos, inclusive o
+`TipoOficio`/`StatusOficio` que o Jurídico já editara, foram preservados.
+
+### Tratativa abandonada em silêncio + prazo jogado fora (incidente 2026-08-05)
+
+Em 05/08 às 07:00 o `run` notificou uma intimação **individual, Pendente, URGENTE**, cliente
+**ativo e adimplente** (proc `53500.098046/2026-23`, Ofício 688 `16067648`, Age
+Telecomunicações), com a linha "▶️ seguir com a tratativa individual". O `tratar --modo real`
+das 07:10 **não a tratou e ninguém soube**.
+
+Nos logs da VPS, tudo estava saudável: cron instalado, `TRATAR_AUTO=true`, execução das 07:10
+logou, coletou 100 e terminou `{"status":"ok"}` imprimindo **`0 candidato(s)`**; o canal de DM
+está vivo (`teams_dm --token` OK). Ou seja: `tratativa.eh_candidato` a **descartou em silêncio**
+— era o único caminho do sistema sem rastro. Causa provável: **alguém do Jurídico abre a
+intimação no SEI antes do cron**, a Situação vira "Cumprida por Consulta Direta" e o bot deixa
+de enxergá-la. O mesmo log mostra o padrão em 03/08 (Ofício 630, `16000695`): falhou com
+`ofício não achado na Lista de Protocolos`, **sem** a linha `⚠️ DANDO CIÊNCIA` (ou seja
+`urls_aceite()` já vinha vazio), nunca entrou em `tratadas` — e ainda assim sumiu da seleção
+nas execuções seguintes.
+
+**⚠️ Bug de produção achado junto: o prazo era capturado e descartado.** As 12 linhas de
+`tratadas` na VPS estavam com `data_limite` **vazio**, inclusive a FONELIGHT cujo log da mesma
+execução mostrava `prazo: 03/09/2026`. `store.marcar_tratado` usava `INSERT OR IGNORE` e o
+`--modo real` grava **duas vezes**: o checkpoint pós-ciência (sem prazo — ele só é legível
+depois) e a gravação final com o prazo. A segunda era descartada. Só se manifesta no
+`--modo real` (o `--modo completo` não dá ciência, logo não faz checkpoint) — por isso nunca
+apareceu em dev.
+
+**O que mudou:**
+
+- `store.marcar_tratado` virou **UPSERT** (`ON CONFLICT … DO UPDATE … WHERE excluded.data_limite != ''`):
+  a condição impede que um checkpoint tardio apague um prazo já gravado. Ganhou `prazo_dias` e
+  `prazo_unidade` (dia útil ≠ dia corrido). Migração in-place por `ALTER TABLE` no `__init__`
+  (`_garantir_colunas`) — o banco de produção é volume, não dá para recriar.
+- **Nova tabela `promessas`** + `registrar_promessa` / `promessas_abertas` / `quitar_promessa` /
+  `marcar_promessa_avisada`. O `run` registra o que prometeu (mesma condição de
+  `notify._decisao_individual`, **após** o envio bem-sucedido); o `tratar --modo real`
+  reconcilia no fim (`monitor._reconciliar_promessas`).
+- `tratativa.eh_candidato` → **`motivo_nao_candidato(g, clientes, promessa_aberta=)`**, que
+  devolve o motivo em texto (espelha `clientes.motivo_sem_tratativa`). Toda promessa não
+  cumprida rende aviso **no grupo do Jurídico** (`notify.formatar_promessa_nao_cumprida`) com o
+  motivo; erro técnico continua indo só para a DM.
+- **Ciência dada por humano deixa de cancelar a tratativa**: `motivo_nao_candidato` aceita
+  `Cumprida por Consulta Direta`/`por Decurso do Prazo Tácito` **somente com promessa aberta**.
+  ⚠️ Esse escopo é a **salvaguarda principal** — aceitar amplamente faria o próximo
+  `--modo real` tratar todo o histórico cumprido da janela de 100 linhas, disparando dezenas
+  de rascunhos a clientes de uma vez. "Respondida" nunca volta (não há o que encaminhar).
+- `backfill_prazos.py` (raiz) recupera as 12 linhas antigas a partir do `DataVencimento` dos
+  **cards do Kanban** (que nunca teve o bug), casando por processo + `doc_id` do `NumeroOficio`.
+  `--aplicar` para gravar; sem a flag é ensaio.
+
+**139 testes.** ⚠️ Produção roda **da imagem** → `docker compose build` na VPS antes do próximo
+cron, senão o container segue sem nada disso.
+
+⚠️ **`pytest` mandava Teams de verdade.** `config.py` avalia `os.getenv(...)` nos *defaults de
+campo* da dataclass (no import, logo após `load_dotenv`), então `Config()` dentro de teste **é a
+config de produção**: `test_erro_ao_enviar_nao_marca_e_reenvia` fazia `erros.notificar_erro`
+disparar DM real (os alertas "ofício 10/20 · P10/P20" de 05/08 vieram daí, não de produção) e
+ainda rotacionava o refresh token em `state/.graph_token.json`. Mitigado no `_cfg()` do
+`test_monitor.py` (zera todos os canais de saída). A correção de fundo — `conftest.py` na raiz
+neutralizando `load_dotenv` e limpando o `os.environ` **antes** de importar `seibot` — segue
+pendente por decisão do usuário.
 
 ### Card do ofício no Kanban do Jurídico (feature 2026-07-22)
 

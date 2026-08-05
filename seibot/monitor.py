@@ -30,12 +30,34 @@ def _data_key(d: str):
         return date.min
 
 
+def _registrar_promessas(store: IntimacoesStore, g: Grupo, clientes, log) -> int:
+    """Registra a promessa de tratativa feita ao grupo do Jurídico.
+
+    A condição é EXATAMENTE a de `notify._decisao_individual` ao imprimir "▶️ Cliente
+    ATIVO e adimplente — seguir com a tratativa individual": individual + o cliente passa
+    em `motivo_sem_tratativa`. Fonte única para as duas nunca divergirem — mesmo princípio
+    já usado entre `notify` e `tratativa`.
+
+    Sem isto, uma promessa que deixa de ser candidata até o `tratar` das 07:10 some sem
+    rastro (incidente da Age Telecomunicações, 05/08/2026).
+    """
+    if clientes is None or g.tipo != "individual":
+        return 0
+    intim = g.destinatarios[0]
+    if clientes_mod.motivo_sem_tratativa(clientes.info(intim.documento)) is not None:
+        return 0
+    store.registrar_promessa(intim, g.oficio_desc)
+    log(f"  ↳ promessa de tratativa registrada: {g.processo} | {intim.destinatario}")
+    return 1
+
+
 def executar(
     cfg: Config,
     *,
     page,
     store: IntimacoesStore,
     enviar: Callable[[Grupo], None],
+    clientes=None,
     paginas: int = 1,
     log=print,
 ) -> dict:
@@ -58,7 +80,7 @@ def executar(
                 "grupos": len(grupos), "novos": len(novos), "erro": msg}
 
     novos.sort(key=lambda g: _data_key(g.data_expedicao))
-    notificados = falhas = 0
+    notificados = falhas = prometidos = 0
     for g in novos:
         try:
             enviar(g)
@@ -71,11 +93,14 @@ def executar(
             continue
         for i in g.destinatarios:
             store.marcar_visto(i, g.tipo)
+        # só depois do envio bem-sucedido: a promessa só existe se o Jurídico a recebeu
+        prometidos += _registrar_promessas(store, g, clientes, log)
         notificados += 1
 
     return {"status": "ok" if falhas == 0 else "parcial",
             "coletados": len(intims), "grupos": len(grupos),
-            "novos": len(novos), "notificados": notificados, "falhas": falhas}
+            "novos": len(novos), "notificados": notificados,
+            "prometidos": prometidos, "falhas": falhas}
 
 
 # ----------------------------------------------------------------------------
@@ -91,7 +116,7 @@ def _cmd_run(cfg: Config) -> dict:
         cfg.teams_webhook_url, g, cfg.teams_webhook_style, clientes=clientes)
     with fazer_login(cfg) as sess:
         return executar(cfg, page=sess.page, store=store, enviar=enviar,
-                        paginas=cfg.run_paginas)
+                        clientes=clientes, paginas=cfg.run_paginas)
 
 
 def _cmd_baseline(cfg: Config) -> dict:
@@ -117,7 +142,61 @@ def _cmd_dry_run(cfg: Config) -> dict:
     return {"status": "ok", "coletados": len(intims), "grupos": len(grupos), "novos": len(novos)}
 
 
-def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = None) -> dict:
+def _reconciliar_promessas(cfg: Config, store: IntimacoesStore, grupos: list[Grupo],
+                           clientes, concluidas: set, log=print) -> int:
+    """Fecha o ciclo: toda promessa aberta ou foi cumprida, ou rende um aviso com o motivo.
+
+    Este é o conserto do incidente de 05/08/2026: a promessa some da seleção e ninguém
+    sabe. Agora, se a intimação ainda está na raspagem mas não é mais candidata, o motivo
+    exato vai para o grupo do Jurídico; se sumiu da janela de 100 linhas, avisa uma vez.
+    """
+    from . import tratativa
+    from .store import PROMESSA_DESCARTADA, PROMESSA_TRATADA
+    from .teams import enviar_teams_webhook
+
+    # indexa por destinatário: a promessa é de UMA empresa, mas o ofício pode ter virado
+    # coletivo desde o `run` — e é justamente esse caso que precisa ser explicado.
+    por_chave = {i.chave: g for g in grupos for i in g.destinatarios}
+
+    avisos = 0
+    for p in store.promessas_abertas():
+        chave = p["chave"]
+        if chave in concluidas:
+            store.quitar_promessa(chave, PROMESSA_TRATADA)
+            continue
+
+        g = por_chave.get(chave)
+        if g is None:
+            # saiu da janela de 100 linhas raspadas — pode voltar num ciclo futuro.
+            # Avisa uma vez e mantém aberta.
+            if p.get("avisada"):
+                continue
+            motivo = ("a intimação saiu da janela de raspagem (100 mais recentes) "
+                      "antes de ser tratada")
+            store.marcar_promessa_avisada(chave)
+        else:
+            motivo = tratativa.motivo_nao_candidato(g, clientes, promessa_aberta=True)
+            if motivo is None:
+                continue  # ainda é candidata: foi falha de tratativa, já alertada por DM
+            store.quitar_promessa(chave, PROMESSA_DESCARTADA, motivo, avisada=True)
+
+        log(f"  ⚠️ promessa não cumprida: {p['processo']} | {p['empresa']} — {motivo}")
+        if cfg.teams_webhook_url:
+            try:
+                enviar_teams_webhook(
+                    cfg.teams_webhook_url,
+                    notify.formatar_promessa_nao_cumprida(p, motivo),
+                    cfg.teams_webhook_style)
+                avisos += 1
+            except Exception as e:  # noqa: BLE001 — avisar não pode derrubar o comando
+                log(f"     (falhou ao avisar o grupo: {e})")
+                erros.notificar_erro(cfg, f"aviso de promessa não cumprida · {p['processo']}",
+                                     e, log=log)
+    return avisos
+
+
+def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = None,
+                doc_id_alvo: str | None = None) -> dict:
     """Fase 2 — tratativa individual, em 3 modos:
     - ensaio (default): só LISTA candidatos (individual+ativo+Pendente). NÃO abre nada.
     - completo <--processo P>: ENSAIO GERAL num processo JÁ CUMPRIDO (Situação != Pendente):
@@ -132,8 +211,8 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
         return {"status": "erro", "modo": "real",
                 "erro": "TRATAR_AUTO=false no .env — o modo real dá CIÊNCIA (inicia prazo "
                         "legal) e está desarmado. Ligue TRATAR_AUTO=true para armar."}
-    if modo == "completo" and not processo_alvo:
-        return {"status": "erro", "erro": "modo completo exige --processo <nº>."}
+    if modo == "completo" and not (processo_alvo or doc_id_alvo):
+        return {"status": "erro", "erro": "modo completo exige --processo <nº> ou --doc-id <id>."}
 
     clientes = clientes_mod.carregar_clientes()
     store = IntimacoesStore(cfg.seen_db_path)
@@ -153,29 +232,42 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
                     "candidatos": len(candidatos)}
 
         if modo == "completo":
-            g = next((x for x in grupos if x.processo == processo_alvo and x.tipo == "individual"), None)
+            # --doc-id desambigua processo com MAIS DE UMA intimação: casar só por
+            # `processo` pega o primeiro grupo e abre a intimação errada (visto na Maxxnet
+            # 53524.000048/2026-12, com 2 Notificações de Lançamento).
+            alvo = f"doc {doc_id_alvo}" if doc_id_alvo else processo_alvo
+            g = next((x for x in grupos if x.tipo == "individual"
+                      and (x.doc_id == doc_id_alvo if doc_id_alvo else x.processo == processo_alvo)),
+                     None)
             if g is None:
-                return {"status": "erro", "erro": f"processo individual {processo_alvo} não achado na página."}
+                return {"status": "erro", "erro": f"intimação individual ({alvo}) não achada na página."}
             if g.situacao == "Pendente":
                 return {"status": "erro",
                         "erro": "ABORTADO: processo Pendente — o ensaio-completo só roda em já cumprido (não dar ciência)."}
-            print(f"\n===== TRATAR (ENSAIO-COMPLETO) em {processo_alvo} (Situação: {g.situacao}) =====")
+            print(f"\n===== TRATAR (ENSAIO-COMPLETO) em {g.processo} / {g.oficio_desc} "
+                  f"({g.doc_id}) (Situação: {g.situacao}) =====")
             r = tratativa.tratar_um(sess, cfg, g, clientes, store, criar_rascunho=True,
                                     dar_ciencia=False,  # ensaio NUNCA dá ciência
                                     url_teams=cfg.teams_webhook_url or None)
             return {"status": "ok", "modo": "completo", **r}
 
         if modo == "real":
-            candidatos = [g for g in tratativa.selecionar_candidatos(grupos, clientes)
+            # promessas abertas: além de serem reconciliadas no fim, elas AUTORIZAM tratar
+            # uma intimação cuja ciência já foi dada por um humano (ver motivo_nao_candidato).
+            prometidas = {p["chave"] for p in store.promessas_abertas()}
+            candidatos = [g for g in tratativa.selecionar_candidatos(grupos, clientes, prometidas)
                           if not store.ja_tratado(g.destinatarios[0].chave)]
-            print(f"\n===== TRATAR (REAL — DÁ CIÊNCIA): {len(candidatos)} candidato(s) =====")
+            print(f"\n===== TRATAR (REAL — DÁ CIÊNCIA): {len(candidatos)} candidato(s) "
+                  f"| {len(prometidas)} promessa(s) aberta(s) =====")
             tratados, falhas, criticas = 0, 0, 0
+            concluidas: set = set()
             for g in candidatos:
                 try:
                     tratativa.tratar_um(sess, cfg, g, clientes, store, criar_rascunho=True,
                                         dar_ciencia=True,  # modo real: DÁ CIÊNCIA
                                         url_teams=cfg.teams_webhook_url or None)
                     tratados += 1
+                    concluidas.add(g.destinatarios[0].chave)
                 except tratativa.TratativaIncompleta as e:
                     # ciência JÁ dada: prazo correndo, sem retry automático, cliente não avisado
                     criticas += 1
@@ -196,9 +288,12 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
                         detalhe=(f"<b>Empresa:</b> {g.destinatarios[0].destinatario}<br>"
                                  f"<b>Ofício:</b> {g.oficio_desc} ({g.doc_id})<br>"
                                  "Ciência NÃO foi dada; será retentado no próximo ciclo."))
+            # fecha o ciclo: nenhuma promessa pode terminar a execução sem destino
+            avisos = _reconciliar_promessas(cfg, store, grupos, clientes, concluidas)
             return {"status": "ok" if falhas == 0 else "parcial", "modo": "real",
                     "candidatos": len(candidatos), "tratados": tratados,
-                    "falhas": falhas, "criticas": criticas}
+                    "falhas": falhas, "criticas": criticas,
+                    "promessas_abertas": len(prometidas), "avisos_promessa": avisos}
 
     return {"status": "erro", "erro": f"modo inválido: {modo}"}
 
@@ -210,6 +305,9 @@ def main(argv=None) -> int:
                         help="modo do 'tratar' (default: ensaio)")
     parser.add_argument("--processo", default=None,
                         help="nº do processo (para 'tratar --modo completo')")
+    parser.add_argument("--doc-id", dest="doc_id", default=None,
+                        help="id do documento no SEI — desambigua processo com mais de "
+                             "uma intimação (para 'tratar --modo completo')")
     args = parser.parse_args(argv)
 
     # o load_config pode falhar (.env incompleto) antes de existir cfg p/ notificar
@@ -227,7 +325,7 @@ def main(argv=None) -> int:
         elif args.comando == "baseline":
             res = _cmd_baseline(cfg)
         elif args.comando == "tratar":
-            res = _cmd_tratar(cfg, args.modo, args.processo)
+            res = _cmd_tratar(cfg, args.modo, args.processo, args.doc_id)
         else:
             res = _cmd_dry_run(cfg)
     except Exception as e:  # noqa: BLE001 — inclusive erros não mapeados

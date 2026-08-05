@@ -102,6 +102,10 @@ eles façam a respeito.
 - `python -m seibot.monitor run` — detecta e notifica.
 - `python -m seibot.monitor baseline` — marca recentes como vistos, sem notificar.
 - `python -m seibot.monitor tratar --modo ensaio` — lista candidatos à tratativa, sem abrir nada.
+- `python backfill_prazos.py [--aplicar]` — recupera prazos antigos perdidos em `tratadas`
+  (a partir do `DataVencimento` dos cards do Kanban). Sem `--aplicar` é ensaio.
+- `python -m seibot.monitor tratar --modo completo --doc-id <id>` — alveja UMA intimação
+  (use em processo com mais de uma; `--processo` pega a primeira).
 - `python -m seibot.monitor tratar --modo completo --processo <nº>` — ensaio-geral num processo
   **já cumprido**: roda tudo e cria rascunho de verdade, **sem** dar ciência.
 - `python -m seibot.monitor tratar --modo real` — produção da Fase 2 (**DÁ CIÊNCIA**).

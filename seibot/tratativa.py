@@ -16,6 +16,12 @@ from .clientes import BaseClientes, motivo_sem_tratativa
 from .models import Grupo, Intimacao
 
 SITUACAO_PENDENTE = "Pendente"
+# Situações em que a ciência JÁ foi dada (por humano ou pelo bot) e o prazo já corre.
+# "Respondida" fica de fora: o cliente já respondeu, não há o que encaminhar.
+SITUACOES_CIENCIA_DADA = frozenset({
+    "Cumprida por Consulta Direta",
+    "Cumprida por Decurso do Prazo Tácito",
+})
 
 
 class TratativaIncompleta(RuntimeError):
@@ -140,6 +146,11 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
         store.marcar_tratado(intim, "")   # checkpoint: ciência dada, prazo já corre
         processo.abrir_processo(page, intim.consulta_url)  # recarrega já com os links vivos
         log("   ✓ ciência confirmada")
+    else:
+        # Sem ícone de aceite = a ciência já foi dada (tipicamente por alguém do Jurídico
+        # que abriu a intimação no SEI antes do cron das 07:10). O prazo já corre, então
+        # seguimos com o resto — é o único jeito de o cliente receber o ofício.
+        log("   • sem ícone de aceite: ciência já dada fora do bot — seguindo sem dar ciência")
 
     try:
         return _tratar_apos_ciencia(sess, cfg, grupo, intim, clientes, store,
@@ -228,29 +239,57 @@ def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
                                 card_criado=bool(card_id)),
             "text")
 
-    store.marcar_tratado(intim, prazo.data_limite if prazo else "")
+    # grava o prazo completo (dias + unidade): dia útil ≠ dia corrido, e a cadência de
+    # avisos de vencimento vai depender dos dois.
+    store.marcar_tratado(intim, prazo.data_limite if prazo else "",
+                         prazo_dias=prazo.dias if prazo else None,
+                         prazo_unidade=prazo.unidade if prazo else "")
     return {"processo": grupo.processo, "empresa": intim.destinatario,
             "prazo": prazo.data_limite if prazo else None,
             "emails": emails, "anexos": len(anexos), "rascunho": criar_rascunho,
             "card": card_id}
 
 
-def eh_candidato(g: Grupo, clientes: Optional[BaseClientes]) -> bool:
+def motivo_nao_candidato(g: Grupo, clientes: Optional[BaseClientes], *,
+                         promessa_aberta: bool = False) -> Optional[str]:
+    """Por que este grupo NÃO deve ser tratado. `None` = pode tratar.
+
+    Espelha `clientes.motivo_sem_tratativa`: devolve texto pronto para o Teams, para que
+    o descarte deixe de ser silencioso. Antes isto era um `eh_candidato` booleano, e uma
+    intimação prometida podia sumir da seleção sem nenhum registro do porquê — foi o que
+    aconteceu com a Age Telecomunicações em 05/08/2026 (Ofício 688).
+    """
     if g.tipo != "individual":
-        return False
+        return f"o ofício virou coletivo ({len(g.destinatarios)} destinatários)"
     intim = g.destinatarios[0]
     if intim.situacao != SITUACAO_PENDENTE:
-        return False
+        # Ciência já dada. Se o bot havia prometido tratar, ele segue mesmo assim: o passo
+        # irreversível ficou para trás e o cliente continua precisando do ofício e do prazo
+        # (decisão do usuário, 2026-08-05). Sem promessa aberta, NÃO — senão o próximo
+        # `--modo real` trataria todo o histórico cumprido da janela de 100 linhas de uma
+        # vez, enviando dezenas de rascunhos a clientes.
+        if not (promessa_aberta and intim.situacao in SITUACOES_CIENCIA_DADA):
+            return f"situação mudou para '{intim.situacao}'"
     if clientes is None:
-        return False  # sem base não dá p/ afirmar que é ativo → não trata
+        return "sem base de clientes para decidir (SharePoint indisponível)"
     # mesma regra do aviso ao Jurídico (notify): ativo E não-inadimplente
-    return motivo_sem_tratativa(clientes.info(intim.documento)) is None
+    return motivo_sem_tratativa(clientes.info(intim.documento))
 
 
-def selecionar_candidatos(grupos: list[Grupo], clientes: Optional[BaseClientes]) -> list[Grupo]:
-    """Grupos individuais + Situação Pendente + cliente ATIVO e NÃO-INADIMPLENTE.
+def eh_candidato(g: Grupo, clientes: Optional[BaseClientes], *,
+                 promessa_aberta: bool = False) -> bool:
+    return motivo_nao_candidato(g, clientes, promessa_aberta=promessa_aberta) is None
+
+
+def selecionar_candidatos(grupos: list[Grupo], clientes: Optional[BaseClientes],
+                          prometidas: "set[str] | None" = None) -> list[Grupo]:
+    """Grupos individuais + cliente ATIVO e NÃO-INADIMPLENTE, com Situação Pendente —
+    ou já com ciência dada, se estiver entre as `prometidas` (chaves de promessa aberta).
 
     Inadimplente ativo fica de fora de propósito (decisão 2026-07-21): o bot não abre nem
     dá ciência — o Jurídico é avisado pelo `run` com o motivo e trata à mão.
     """
-    return [g for g in grupos if eh_candidato(g, clientes)]
+    prometidas = prometidas or set()
+    return [g for g in grupos
+            if eh_candidato(g, clientes,
+                            promessa_aberta=g.destinatarios[0].chave in prometidas)]

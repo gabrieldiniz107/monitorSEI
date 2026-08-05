@@ -59,6 +59,81 @@ def test_individual_ativo_mas_cumprida_nao_eh_candidato():
     assert selecionar_candidatos(g, cli) == []
 
 
+# ---------------------------------------------------------------------------
+# O descarte deixa de ser silencioso: motivo_nao_candidato devolve texto pronto
+# (incidente da Age Telecomunicações — Ofício 688, 05/08/2026)
+# ---------------------------------------------------------------------------
+def test_motivo_none_quando_pode_tratar():
+    g = agrupar_por_oficio([_intim("10", "111")])[0]
+    assert tratativa.motivo_nao_candidato(g, _Clientes({"111": _ativo("111")})) is None
+
+
+def test_motivo_diz_que_virou_coletivo():
+    g = agrupar_por_oficio([_intim("10", "111"), _intim("10", "222")])[0]
+    cli = _Clientes({"111": _ativo("111"), "222": _ativo("222")})
+    assert "coletivo" in tratativa.motivo_nao_candidato(g, cli)
+
+
+def test_motivo_diz_que_a_situacao_mudou():
+    g = agrupar_por_oficio([_intim("10", "111", situacao="Respondida")])[0]
+    m = tratativa.motivo_nao_candidato(g, _Clientes({"111": _ativo("111")}))
+    assert "situação mudou" in m and "Respondida" in m
+
+
+def test_motivo_diz_que_falta_a_base_de_clientes():
+    g = agrupar_por_oficio([_intim("10", "111")])[0]
+    assert "sem base de clientes" in tratativa.motivo_nao_candidato(g, None)
+
+
+def test_motivo_reaproveita_o_texto_de_motivo_sem_tratativa():
+    g = agrupar_por_oficio([_intim("10", "111")])[0]
+    cli = _Clientes({"111": _ativo_inadimplente("111")})
+    assert "INADIMPLENTE" in tratativa.motivo_nao_candidato(g, cli)
+
+
+# ---------------------------------------------------------------------------
+# Ciência dada por humano: o bot segue a tratativa — mas SÓ se houver promessa aberta
+# ---------------------------------------------------------------------------
+def test_cumprida_COM_promessa_aberta_volta_a_ser_candidata():
+    """Alguém do Jurídico abriu a intimação antes do cron: a ciência já foi dada e o
+    prazo corre, mas o cliente ainda precisa do ofício. O bot conclui o resto."""
+    g = agrupar_por_oficio([_intim("10", "111", situacao="Cumprida por Consulta Direta")])[0]
+    cli = _Clientes({"111": _ativo("111")})
+    assert tratativa.motivo_nao_candidato(g, cli, promessa_aberta=True) is None
+
+
+def test_cumprida_SEM_promessa_continua_fora():
+    """Salvaguarda principal: sem esta trava, o próximo `--modo real` trataria todo o
+    histórico cumprido da janela de 100 linhas — dezenas de rascunhos a clientes."""
+    g = agrupar_por_oficio([_intim("10", "111", situacao="Cumprida por Consulta Direta")])[0]
+    cli = _Clientes({"111": _ativo("111")})
+    assert tratativa.motivo_nao_candidato(g, cli, promessa_aberta=False) is not None
+
+
+def test_respondida_nao_volta_nem_com_promessa():
+    """Cliente já respondeu — não há o que encaminhar."""
+    g = agrupar_por_oficio([_intim("10", "111", situacao="Respondida")])[0]
+    cli = _Clientes({"111": _ativo("111")})
+    assert tratativa.motivo_nao_candidato(g, cli, promessa_aberta=True) is not None
+
+
+def test_inadimplente_nao_volta_nem_com_promessa():
+    """A promessa autoriza a ciência-já-dada, não fura a regra de adimplência."""
+    g = agrupar_por_oficio([_intim("10", "111", situacao="Cumprida por Consulta Direta")])[0]
+    cli = _Clientes({"111": _ativo_inadimplente("111")})
+    assert tratativa.motivo_nao_candidato(g, cli, promessa_aberta=True) is not None
+
+
+def test_selecionar_candidatos_usa_o_conjunto_de_prometidas():
+    ints = [_intim("10", "111", situacao="Cumprida por Consulta Direta"),
+            _intim("20", "222", situacao="Cumprida por Consulta Direta")]
+    grupos = agrupar_por_oficio(ints)
+    cli = _Clientes({"111": _ativo("111"), "222": _ativo("222")})
+    prometidas = {ints[0].chave}
+    sel = selecionar_candidatos(grupos, cli, prometidas)
+    assert [g.doc_id for g in sel] == ["10"]
+
+
 def test_coletivo_nunca_eh_candidato():
     g = agrupar_por_oficio([_intim("10", "111"), _intim("10", "222")])
     cli = _Clientes({"111": _ativo("111"), "222": _ativo("222")})
@@ -112,7 +187,7 @@ def test_falha_apos_ciencia_vira_TratativaIncompleta(monkeypatch):
     class _Store:
         marcou = []
 
-        def marcar_tratado(self, intim, data_limite=""):
+        def marcar_tratado(self, intim, data_limite="", **kw):
             self.marcou.append(intim.chave)
 
     store = _Store()
@@ -200,7 +275,7 @@ def test_docs_da_intimacao_capturados_antes_da_ciencia_filtram_os_anexos(monkeyp
     enviados = {}
 
     class _Store:
-        def marcar_tratado(self, intim, data_limite=""):
+        def marcar_tratado(self, intim, data_limite="", **kw):
             pass
 
     g = agrupar_por_oficio([_intim("15987480", "111")])[0]
