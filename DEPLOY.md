@@ -41,7 +41,10 @@ CRON_TZ=America/Sao_Paulo
 # Fase 1 — monitorar e notificar (somente leitura)
 0 7,11,14,17 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor run >> /var/log/sei-monitor.log 2>&1
 # Fase 2 — tratativa individual (DÁ CIÊNCIA). 10 min após o run, para não concorrer na sessão.
+# Em sábado/domingo o comando sai sozinho sem logar: ciência só em dia útil.
 10 7,11,14,17 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor tratar --modo real >> /var/log/sei-tratativa.log 2>&1
+# Fase 3 — acompanhamento de prazos (1x/dia). NÃO acessa o SEI: lê o banco + o Kanban.
+30 8 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor prazos >> /var/log/sei-prazos.log 2>&1
 ```
 (Se precisou de xvfb: `... run --rm sei-monitor xvfb-run -a python -m seibot.monitor run ...`)
 

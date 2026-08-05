@@ -70,9 +70,15 @@ class IntimacoesStore:
                 " prometida_em TEXT DEFAULT CURRENT_TIMESTAMP,"
                 " atualizado_em TEXT DEFAULT CURRENT_TIMESTAMP)"
             )
-            # migração in-place: bancos já em produção não têm as colunas de prazo
-            self._garantir_colunas(con, "tratadas",
-                                   {"prazo_dias": "INTEGER", "prazo_unidade": "TEXT"})
+            # migração in-place: bancos já em produção não têm as colunas de prazo nem
+            # as de acompanhamento (o `oficio_desc`/`empresa` são só para a mensagem)
+            self._garantir_colunas(con, "tratadas", {
+                "prazo_dias": "INTEGER", "prazo_unidade": "TEXT",
+                "oficio_desc": "TEXT", "empresa": "TEXT",
+                "acomp_estado": "TEXT DEFAULT 'ativo'",   # 'ativo' | 'parado'
+                "acomp_motivo": "TEXT DEFAULT ''",
+                "acomp_ultimo_aviso": "TEXT DEFAULT ''",  # 'AAAA-MM-DD' (dedup do dia)
+            })
             con.commit()
 
     @staticmethod
@@ -132,7 +138,8 @@ class IntimacoesStore:
             ).fetchone() is not None
 
     def marcar_tratado(self, intim: Intimacao, data_limite: str = "",
-                       prazo_dias: Optional[int] = None, prazo_unidade: str = "") -> None:
+                       prazo_dias: Optional[int] = None, prazo_unidade: str = "",
+                       oficio_desc: str = "") -> None:
         """Marca a intimação como tratada e grava o prazo.
 
         ⚠️ Chamado DUAS vezes no `--modo real`: uma como checkpoint logo após a ciência
@@ -148,15 +155,19 @@ class IntimacoesStore:
         with closing(sqlite3.connect(self._path)) as con:
             con.execute(
                 "INSERT INTO tratadas "
-                "(chave, processo, doc_id, cnpj, data_limite, prazo_dias, prazo_unidade) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "(chave, processo, doc_id, cnpj, data_limite, prazo_dias, prazo_unidade,"
+                " oficio_desc, empresa) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(chave) DO UPDATE SET "
                 " data_limite = excluded.data_limite,"
                 " prazo_dias = excluded.prazo_dias,"
-                " prazo_unidade = excluded.prazo_unidade "
+                " prazo_unidade = excluded.prazo_unidade,"
+                " oficio_desc = COALESCE(NULLIF(excluded.oficio_desc,''), tratadas.oficio_desc),"
+                " empresa = COALESCE(NULLIF(excluded.empresa,''), tratadas.empresa) "
                 "WHERE excluded.data_limite != ''",
                 (intim.chave, intim.processo, intim.doc_id, intim.documento,
-                 data_limite, prazo_dias, prazo_unidade),
+                 data_limite, prazo_dias, prazo_unidade,
+                 oficio_desc, intim.destinatario),
             )
             con.commit()
 
@@ -167,6 +178,31 @@ class IntimacoesStore:
                 "SELECT data_limite, prazo_dias, prazo_unidade FROM tratadas WHERE chave = ?",
                 (chave,),
             ).fetchone()
+
+    # --- Fase 3: acompanhamento de prazos ---
+    def em_acompanhamento(self) -> list[dict]:
+        """Tratativas com prazo e contagem ainda ativa — as candidatas ao aviso de hoje."""
+        with closing(sqlite3.connect(self._path)) as con:
+            con.row_factory = sqlite3.Row
+            return [dict(r) for r in con.execute(
+                "SELECT * FROM tratadas WHERE data_limite IS NOT NULL AND data_limite != ''"
+                " AND COALESCE(acomp_estado,'ativo') = 'ativo' ORDER BY data_limite")]
+
+    def marcar_aviso_prazo(self, chave: str, dia: str) -> None:
+        """`dia` = 'AAAA-MM-DD'. Evita repetir o mesmo aviso se o comando rodar 2x no dia."""
+        with closing(sqlite3.connect(self._path)) as con:
+            con.execute("UPDATE tratadas SET acomp_ultimo_aviso = ? WHERE chave = ?",
+                        (dia, chave))
+            con.commit()
+
+    def parar_acompanhamento(self, chave: str, motivo: str) -> None:
+        """Encerra a contagem. ⚠️ NÃO significa processo resolvido — só que o gatilho
+        (a raia do Kanban) deixou de valer."""
+        with closing(sqlite3.connect(self._path)) as con:
+            con.execute(
+                "UPDATE tratadas SET acomp_estado = 'parado', acomp_motivo = ? WHERE chave = ?",
+                (motivo, chave))
+            con.commit()
 
     # --- Fase 2: promessas de tratativa (reconciliação run → tratar) ---
     def registrar_promessa(self, intim: Intimacao, oficio_desc: str = "") -> None:

@@ -243,7 +243,8 @@ def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
     # avisos de vencimento vai depender dos dois.
     store.marcar_tratado(intim, prazo.data_limite if prazo else "",
                          prazo_dias=prazo.dias if prazo else None,
-                         prazo_unidade=prazo.unidade if prazo else "")
+                         prazo_unidade=prazo.unidade if prazo else "",
+                         oficio_desc=grupo.oficio_desc)
     return {"processo": grupo.processo, "empresa": intim.destinatario,
             "prazo": prazo.data_limite if prazo else None,
             "emails": emails, "anexos": len(anexos), "rascunho": criar_rascunho,

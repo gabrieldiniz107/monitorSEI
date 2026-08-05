@@ -17,7 +17,8 @@ import traceback
 from datetime import date, datetime
 from typing import Callable
 
-from . import classificar, clientes as clientes_mod, erros, intimacoes, notify
+from . import (classificar, clientes as clientes_mod, datas, erros, intimacoes,
+               notify, oficio_card)
 from .config import Config, load_config
 from .models import Grupo
 from .store import IntimacoesStore
@@ -195,6 +196,94 @@ def _reconciliar_promessas(cfg: Config, store: IntimacoesStore, grupos: list[Gru
     return avisos
 
 
+def _cmd_prazos(cfg: Config, hoje: date | None = None) -> dict:
+    """Fase 3 — acompanhamento de prazos (roda 1x/dia; NÃO acessa o SEI).
+
+    Para cada tratativa com prazo e contagem ativa: consulta a raia do card no Kanban
+    **antes** de qualquer aviso (exigência do usuário) e então
+      - raia == 'Aguardando documentação (cliente)' → avisa se hoje é dia da cadência;
+      - saiu da raia                                → avisa que a contagem PAROU e para;
+      - sem card                                    → avisa o Jurídico e para (sem raia
+        não dá para acompanhar).
+    """
+    hoje = hoje or date.today()
+    if not cfg.teams_webhook_url:
+        return {"status": "erro", "erro": "TEAMS_WEBHOOK_INTIMACOES_URL não configurado."}
+
+    store = IntimacoesStore(cfg.seen_db_path)
+    clientes = clientes_mod.carregar_clientes()
+    g = getattr(clientes, "graph", None)
+    if g is None:
+        return {"status": "erro",
+                "erro": "SharePoint indisponível — sem o Kanban não dá para saber a raia."}
+
+    from .teams import enviar_teams_webhook as _envia
+    return acompanhar_prazos(
+        store=store, cards=_indexar_cards(g), hoje=hoje,
+        enviar=lambda msg: _envia(cfg.teams_webhook_url, msg, cfg.teams_webhook_style))
+
+
+def acompanhar_prazos(*, store: IntimacoesStore, cards: dict, hoje: date,
+                      enviar, log=print) -> dict:
+    """Núcleo do acompanhamento, com dependências injetadas (mesmo padrão do `executar`).
+
+    ⚠️ Consulta a raia do Kanban **antes** de qualquer aviso — exigência do usuário: se o
+    card saiu de 'Aguardando documentação (cliente)', a mensagem que sai é a de PARADA da
+    contagem, nunca mais um lembrete de prazo.
+    """
+    from . import prazos
+
+    linhas = store.em_acompanhamento()
+    avisos = paradas = sem_card = 0
+    for linha in linhas:
+        card = cards.get((linha["processo"], linha["doc_id"])) or cards.get((linha["processo"], ""))
+        if card is None:
+            log(f"  ⚠️ sem card: {linha['processo']} | doc {linha['doc_id']}")
+            enviar(prazos.formatar_sem_card(linha))
+            store.parar_acompanhamento(linha["chave"], prazos.PARADA_SEM_CARD)
+            sem_card += 1
+            continue
+
+        status = (card.get("StatusOficio") or "").strip()
+        if status != oficio_card.STATUS_AGUARDANDO:
+            log(f"  ⏹️ parou: {linha['processo']} — Kanban agora '{status or '(branco)'}'")
+            enviar(prazos.formatar_parada(linha, prazos.PARADA_SAIU_DA_RAIA, status))
+            store.parar_acompanhamento(linha["chave"], prazos.PARADA_SAIU_DA_RAIA)
+            paradas += 1
+            continue
+
+        d = prazos.decidir(linha["data_limite"], linha["prazo_dias"], hoje,
+                           ja_avisou_hoje=(linha.get("acomp_ultimo_aviso") == hoje.isoformat()))
+        if d is None or not d.avisar:
+            continue
+        log(f"  ⏳ aviso: {linha['processo']} — faltam {d.faltam} dia(s)")
+        enviar(prazos.formatar_aviso(linha, d))
+        store.marcar_aviso_prazo(linha["chave"], hoje.isoformat())
+        avisos += 1
+
+    return {"status": "ok", "acompanhando": len(linhas), "avisos": avisos,
+            "paradas": paradas, "sem_card": sem_card}
+
+
+def _indexar_cards(g) -> dict:
+    """(processo, doc_id) -> fields do card, mais (processo, '') como alternativa.
+
+    O `doc_id` sai do `NumeroOficio` ("Ofício 407 (15843941)"). A entrada com doc_id
+    vazio cobre card criado à mão, sem o nº do documento no campo.
+    ⚠️ Processo com mais de uma intimação tem UM card só (a criação é idempotente por nº
+    do processo) — as duas linhas caem no mesmo card e param juntas.
+    """
+    import re
+    cards = {}
+    for it in g.itens(oficio_card.LISTA_CONTROLE_OFICIO, top=200):
+        f = it.get("fields", {})
+        titulo = (f.get("Title") or "").strip()
+        m = re.search(r"\((\d{5,})\)", f.get("NumeroOficio") or "")
+        cards[(titulo, m.group(1) if m else "")] = f
+        cards.setdefault((titulo, ""), f)
+    return cards
+
+
 def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = None,
                 doc_id_alvo: str | None = None) -> dict:
     """Fase 2 — tratativa individual, em 3 modos:
@@ -211,6 +300,13 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
         return {"status": "erro", "modo": "real",
                 "erro": "TRATAR_AUTO=false no .env — o modo real dá CIÊNCIA (inicia prazo "
                         "legal) e está desarmado. Ligue TRATAR_AUTO=true para armar."}
+    # Ciência só em dia útil (decisão do usuário, 2026-08-05): iniciar prazo legal em
+    # sábado/domingo é decisão do Jurídico, não da automação. Verificado ANTES do login,
+    # como a trava do TRATAR_AUTO — não gasta 2FA. As candidatas continuam Pendentes e
+    # são pegas na segunda; a promessa segue aberta, sem falso alarme na reconciliação.
+    if modo == "real" and not datas.eh_dia_util(date.today()):
+        return {"status": "ok", "modo": "real", "candidatos": 0, "tratados": 0,
+                "pulado": "fim de semana — ciência só em dia útil"}
     if modo == "completo" and not (processo_alvo or doc_id_alvo):
         return {"status": "erro", "erro": "modo completo exige --processo <nº> ou --doc-id <id>."}
 
@@ -300,7 +396,8 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="seibot.monitor", description="Monitor de Intimações SEI")
-    parser.add_argument("comando", choices=["run", "baseline", "dry-run", "tratar"])
+    parser.add_argument("comando",
+                        choices=["run", "baseline", "dry-run", "tratar", "prazos"])
     parser.add_argument("--modo", choices=["ensaio", "completo", "real"], default="ensaio",
                         help="modo do 'tratar' (default: ensaio)")
     parser.add_argument("--processo", default=None,
@@ -326,6 +423,8 @@ def main(argv=None) -> int:
             res = _cmd_baseline(cfg)
         elif args.comando == "tratar":
             res = _cmd_tratar(cfg, args.modo, args.processo, args.doc_id)
+        elif args.comando == "prazos":
+            res = _cmd_prazos(cfg)
         else:
             res = _cmd_dry_run(cfg)
     except Exception as e:  # noqa: BLE001 — inclusive erros não mapeados

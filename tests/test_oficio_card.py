@@ -40,8 +40,10 @@ def test_montar_campos_preenche_factuais_e_deixa_workflow_de_fora():
     assert campos["Prioridade"] == "Média"     # não-urgente (single choice → string)
     assert campos["Pacote"] == ["LIGHT"]        # multi-choice → lista
     assert campos["Pacote@odata.type"] == "Collection(Edm.String)"  # exigido pelo Graph
-    # Status e Tipo de Ofício (workflow), Login/Senha e AGU ficam para o Jurídico
-    for k in ("StatusOficio", "TipoOficio", "LoginSEI", "SenhaSEI",
+    # o card NASCE na raia de espera do cliente — é o gatilho do acompanhamento de prazos
+    assert campos["StatusOficio"] == "Aguardando documentação (cliente)"
+    # Tipo de Ofício (workflow), Login/Senha e AGU continuam para o Jurídico preencher
+    for k in ("TipoOficio", "LoginSEI", "SenhaSEI",
               "PrazoAGUdias", "DataInicioAGU", "DataAGUfim"):
         assert k not in campos
 

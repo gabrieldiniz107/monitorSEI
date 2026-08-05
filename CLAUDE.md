@@ -96,9 +96,10 @@ Graph app-only, app "SCM VISTORIAS", `Sites.ReadWrite.All`; credenciais `GRAPH_*
 python -m seibot.monitor dry-run    # mostra o que enviaria (sem banco/Teams)
 python -m seibot.monitor baseline   # marca os recentes como vistos (1x no deploy)
 python -m seibot.monitor run        # detecta novos e notifica no Teams
+python -m seibot.monitor prazos     # Fase 3: avisos de prazo (1x/dia, nao acessa o SEI)
 python -m seibot.monitor tratar --modo completo --doc-id 16067648   # alveja UMA intimação
 python validar_login.py             # valida só o login (teste do Turnstile headless)
-pytest -q                           # 139 testes (parser/classificar/store/notify/monitor/clientes/…)
+pytest -q                           # 179 testes (parser/classificar/store/notify/monitor/clientes/…)
 ```
 
 Parser e classificador são **puros** (testáveis sem browser). A fixture real
@@ -494,6 +495,74 @@ ainda rotacionava o refresh token em `state/.graph_token.json`. Mitigado no `_cf
 `test_monitor.py` (zera todos os canais de saída). A correção de fundo — `conftest.py` na raiz
 neutralizando `load_dotenv` e limpando o `os.environ` **antes** de importar `seibot` — segue
 pendente por decisão do usuário.
+
+### Fase 3 — acompanhamento de prazos (feature 2026-08-05)
+
+Comando novo **`monitor prazos`**, 1x/dia às 08:30 no cron. **Não acessa o SEI**: lê a tabela
+`tratadas` e a lista do Kanban. Fonte da verdade do "ainda está pendente" é a **raia do
+card**, não o SEI.
+
+**Gatilho:** enquanto o card estiver em **"Aguardando documentação (cliente)"**, o prazo é
+contado e o lembrete vai para o **grupo do Jurídico** (mesmo webhook do `run`). Ao sair da
+raia, a contagem para e sai **uma** mensagem de encerramento. ⚠️ Parar de contar **não**
+significa processo resolvido — a mensagem diz isso explicitamente, a pedido do usuário.
+
+**A raia é consultada ANTES de qualquer aviso** (exigência do usuário): se o card já saiu,
+o que sai é a mensagem de parada, nunca mais um lembrete.
+
+**Cadência** (`seibot/prazos.py`, tudo puro):
+
+| Prazo | Avisa a cada |
+|---|---|
+| 5 dias | 1 dia | 
+| 10 dias | 2 dias |
+| 15 dias | 3 dias |
+| 20 dias | 4 dias |
+| 30 dias | 5 dias |
+
+Prazo fora da tabela **arredonda para o degrau inferior** (6→5, 12→10, 25→20, 45→30);
+abaixo de 5, avisa todo dia. `prazo_dias` nulo (as 10 linhas recuperadas pelo backfill, que
+só trouxe a data) também cai em diário — na dúvida, insiste.
+
+⚠️ **A cadência é ancorada no VENCIMENTO**, não na ciência: avisa quando
+`dias_restantes % intervalo == 0`. Assim **sempre existe verificação no dia do vencimento**
+(`faltam == 0`). Consequência a não estranhar: num prazo de 22 dias (intervalo 4) o primeiro
+aviso sai quando faltam 20, não 22. Cadência em **dias corridos** — a data limite já vem
+pronta da Anatel, então não se depende de tabela de feriados.
+
+Estados do aviso: normal (`⏳ faltam N`), **última chance** (`faltam == intervalo` — é o
+gancho onde a automação futura de **defesa/dilação de prazo** vai se plugar), vencimento
+(`🔴 VENCE HOJE`) e **vencido** (`🆘`, diário até moverem o card).
+
+**Sem card no Kanban** → avisa o grupo e encerra o acompanhamento: sem raia não dá para
+saber se ainda está pendente. (Acontece com tratativas anteriores a 22/07, quando a feature
+de card não existia, e com processo multi-intimação — ver o bug do card abaixo.)
+
+**Mudanças de apoio:**
+- `oficio_card`: o card agora **nasce em "Aguardando documentação (cliente)"** (`STATUS_AGUARDANDO`)
+  em vez de ficar sem raia. Card sem raia = prazo não acompanhado.
+- `store.tratadas` ganhou `oficio_desc`, `empresa`, `acomp_estado`, `acomp_motivo`,
+  `acomp_ultimo_aviso` (dedup do dia, para o comando poder ser rodado à mão sem duplicar).
+- `seibot/datas.py`: `eh_dia_util` / `proximo_dia_util` / conversões do formato do SEI.
+- `monitor.acompanhar_prazos(store=, cards=, hoje=, enviar=)` — núcleo com injeção de
+  dependência, igual ao `executar`; `_cmd_prazos` é só a casca que monta store/cards/webhook.
+
+### Ciência só em dia útil (2026-08-05)
+
+`tratar --modo real` **sai sozinho em sábado e domingo**, antes do login (não gasta 2FA),
+igual à trava do `TRATAR_AUTO`. Iniciar prazo legal fora de dia útil é decisão do Jurídico,
+não da automação. As candidatas continuam `Pendente` e são pegas na segunda; a promessa
+segue aberta e a reconciliação **não** dispara falso alarme (ela só avisa quando o grupo
+deixou de ser candidato).
+
+⚠️ **Feriados não são considerados** — só sábado/domingo (`datas.eh_dia_util`). Uma tabela de
+feriados nacionais/municipais precisaria ser mantida à mão e erraria em silêncio ao
+desatualizar. Enquanto isso, o bot **pode dar ciência num feriado**.
+
+⚠️ **Aviso de prazo pode cair em fim de semana.** A cadência é em dias corridos, então num
+prazo de 20 dias iniciado numa sexta a "última chance" cai num domingo (simulado ao vivo).
+Antecipar esses avisos para o dia útil anterior (sexta) preservaria o tempo restante —
+empurrar para segunda o consumiria. Decisão pendente com o usuário.
 
 ### Card do ofício no Kanban do Jurídico (feature 2026-07-22)
 

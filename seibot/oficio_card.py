@@ -3,9 +3,14 @@
 Ao final da tratativa individual, registra o processo na lista **"Jurídico - Controle de
 Ofício"** (site Gestão Integrada) com os dados factuais que já temos em mãos.
 
-**Decisão do usuário (2026-07-22):** os campos de **workflow/juízo** ficam EM BRANCO de
-propósito — o time do Jurídico os edita conforme conduz o caso:
-- `StatusOficio` (as raias do Kanban), `TipoOficio`
+**Decisão do usuário (2026-07-22, revista em 2026-08-05):** os campos de **workflow/juízo**
+ficam EM BRANCO de propósito — o time do Jurídico os edita conforme conduz o caso:
+- `TipoOficio`
+- ⚠️ **`StatusOficio` deixou de ficar em branco (2026-08-05)**: o card agora nasce em
+  **"Aguardando documentação (cliente)"**. Antes ficava sem raia e alguém movia à mão (os
+  25 cards da lista estavam todos preenchidos por humano). Essa raia é o **gatilho do
+  acompanhamento de prazos** (`seibot/prazos.py`): enquanto o card estiver nela a contagem
+  corre; ao sair, para. Card nascendo sem raia significaria prazo não acompanhado.
 - `LoginSEI` / `SenhaSEI` (usamos o login único do Rodrigo, não o do cliente)
 - todo o bloco AGU (`PrazoAGUdias`, `DataInicioAGU`, …); `DataAGUfim` é coluna CALCULADA da
   lista (read-only) — o bot não a toca; ela mostra 30/12/1899 quando o AGU não começou.
@@ -25,6 +30,13 @@ from typing import Optional
 
 # lista "Jurídico - Controle de Ofício" (site Gestão Integrada), descoberta via g.listas()
 LISTA_CONTROLE_OFICIO = "407dc958-8ac3-4224-9026-d0759149a235"
+
+# Raia em que o card NASCE (decisão do usuário, 2026-08-05). Antes ficava em branco e
+# alguém do Jurídico movia à mão — os 25 cards da lista estavam todos preenchidos por
+# humano. Agora o board reflete o estado real desde o primeiro minuto, e esta raia é
+# exatamente o gatilho do acompanhamento de prazos (`seibot/prazos.py`): enquanto o card
+# estiver aqui, a contagem corre; ao sair, para.
+STATUS_AGUARDANDO = "Aguardando documentação (cliente)"
 
 
 def _iso_meia_noite(d: date) -> str:
@@ -55,6 +67,8 @@ def montar_campos(grupo, intim, prazo, info, *, data_cumprimento: date) -> dict:
         # URGENTE (sufixo do Tipo de Intimação no SEI) → Alta; demais → Média. É triagem
         # inicial objetiva; o Jurídico reclassifica se quiser.
         "Prioridade": "Alta" if intim.prioridade_urgente else "Média",
+        # nasce na raia de espera do cliente — é o gatilho do acompanhamento de prazos
+        "StatusOficio": STATUS_AGUARDANDO,
     }
     if info is not None and info.sp_item_id:
         campos["CNPJLookupId"] = info.sp_item_id                   # lookup → Clientes SCM

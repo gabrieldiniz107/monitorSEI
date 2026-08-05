@@ -34,6 +34,8 @@ monitoramento-sei/
 │   ├── resumo.py       # (Fase 2) resumo do ofício via OpenAI
 │   ├── rascunho.py     # (Fase 2) monta e cria o rascunho de e-mail no Jurídico
 │   ├── tratativa.py    # (Fase 2) seleção de candidatos + orquestração da tratativa
+│   ├── prazos.py       # (Fase 3) escadinha de avisos de prazo + mensagens
+│   ├── datas.py        # dia útil (trava da ciência) + conversões de data
 │   ├── erros.py        # alerta de QUALQUER falha na DM do responsável técnico
 │   ├── teams_dm.py     # DM no Teams via Graph delegado (device-code)
 │   └── monitor.py      # orquestrador + CLI (run/baseline/dry-run/tratar)
@@ -71,6 +73,7 @@ python -m seibot.monitor tratar --modo ensaio                  # só lista candi
 python -m seibot.monitor tratar --modo completo --processo NNN # ensaio-geral (sem ciência)
 python -m seibot.monitor tratar --modo completo --doc-id NNN   # idem, alvejando 1 intimação
 python -m seibot.monitor tratar --modo real                    # produção — DÁ CIÊNCIA
+python -m seibot.monitor prazos                                # avisos de prazo (1x/dia)
 ```
 Para cada intimação **nova + individual + cliente ATIVO + Pendente**: abre o processo,
 **dá ciência**, lê o prazo, baixa ofício e anexos, resume com LLM, e cria um **rascunho** de
