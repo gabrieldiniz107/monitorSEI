@@ -14,15 +14,21 @@ Prazo fora da tabela **arredonda para o mapeado imediatamente inferior**: 6 dias
 regra de 5 (avisa todo dia), 12 usa a de 10 (de 2 em 2), 25 usa a de 20, 45 usa a de 30.
 Abaixo de 5 dias, avisa todo dia.
 
-**A cadência é ancorada no VENCIMENTO, contando de trás para frente** — não na data da
-ciência. Assim todo prazo ganha uma verificação exatamente na data limite, e o aviso fala
-em "faltam X dias", que é o que interessa a quem lê. Nos prazos mapeados dá no mesmo (5, 10,
-15, 20 e 30 são todos divisíveis pelo próprio intervalo); a diferença aparece nos
-arredondados — um prazo de 22 dias vira intervalo 4 e cai em 22, 18, 14, 10, 6, 2 e 0.
+**A cadência é ancorada no VENCIMENTO** (`dias_restantes % intervalo == 0`), não na data da
+ciência. Assim o dia da data limite sempre é coberto, e o aviso fala em "faltam X dias", que
+é o que interessa a quem lê. Consequência a não estranhar: num prazo de 22 dias (intervalo 4)
+o primeiro aviso sai quando faltam 20, não 22.
 
-A **última verificação antes do vencimento** (`faltam == intervalo`) sai marcada como tal:
-é o momento em que o Jurídico ainda consegue montar defesa ou pedir dilação de prazo — e é
-o gancho onde essa automação futura vai se plugar.
+**Aviso que cairia em sábado ou domingo é ANTECIPADO para a sexta anterior** (decisão do
+usuário, 2026-08-05). Antecipar preserva o prazo restante; empurrar para a segunda o
+consumiria. Sem isso o alerta mais crítico caía em fim de semana com frequência — num prazo
+de 20 dias iniciado numa sexta, a "última chance" caía num domingo. Prazo VENCIDO também só
+é avisado em dia útil (ele insiste todo dia, então a segunda cobre o fim de semana).
+
+**"Última chance"** = não há mais nenhum aviso agendado **antes** do dia do vencimento. É o
+último momento em que ainda dá para montar defesa ou pedir dilação de prazo — e é o gancho
+onde essa automação futura vai se plugar. O próprio dia do vencimento não conta como "mais um
+aviso" justamente porque ali já é tarde para isso.
 
 Cadência em **dias corridos** (decisão do usuário): a data limite já vem pronta da Anatel,
 então ela está sempre certa; só o intervalo entre lembretes é de calendário, o que evita
@@ -32,10 +38,12 @@ from __future__ import annotations
 
 import html as _html
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
-from .datas import de_ddmmaaaa
+from .datas import de_ddmmaaaa, eh_dia_util
+
+_SEXTA = 4
 
 # prazo do ofício (dias) -> intervalo entre avisos (dias)
 ESCADA = {5: 1, 10: 2, 15: 3, 20: 4, 30: 5}
@@ -66,8 +74,42 @@ class Decisao:
     """O que fazer hoje com um prazo em acompanhamento."""
     avisar: bool
     faltam: int              # dias até o vencimento (negativo = vencido)
-    ultima_chance: bool = False   # última verificação ANTES do vencimento
+    ultima_chance: bool = False   # não há mais aviso agendado antes do vencimento
     vencido: bool = False
+    antecipado: bool = False      # o checkpoint caía no fim de semana e veio para hoje
+
+
+def _dispara_em(limite: date, dia: date, intervalo: int) -> bool:
+    """Este dia dispara aviso, considerando a antecipação de fim de semana?
+
+    Um checkpoint que cai em sábado ou domingo é **antecipado para a sexta anterior**
+    (decisão do usuário, 2026-08-05). Antecipar preserva o prazo restante; empurrar para
+    a segunda o consumiria — e o aviso mais crítico ("última chance para defesa ou
+    dilação") era justamente o que mais caía em fim de semana.
+    """
+    if not eh_dia_util(dia):
+        return False
+    # a sexta responde também pelos checkpoints do sábado e do domingo seguintes
+    extras = (1, 2) if dia.weekday() == _SEXTA else ()
+    for delta in (0, *extras):
+        faltam = (limite - (dia + timedelta(days=delta))).days
+        if faltam >= 0 and faltam % intervalo == 0:
+            return True
+    return False
+
+
+def _ha_aviso_antes_do_vencimento(limite: date, depois_de: date, intervalo: int) -> bool:
+    """Ainda sobra algum aviso agendado entre amanhã e a véspera do vencimento?
+
+    O dia do vencimento **não** conta: naquele momento já não dá para montar defesa nem
+    pedir dilação, que é justamente o que o alerta de "última chance" existe para permitir.
+    """
+    dia = depois_de + timedelta(days=1)
+    while dia < limite:
+        if _dispara_em(limite, dia, intervalo):
+            return True
+        dia += timedelta(days=1)
+    return False
 
 
 def decidir(data_limite: str, prazo_dias: Optional[int], hoje: date,
@@ -80,12 +122,22 @@ def decidir(data_limite: str, prazo_dias: Optional[int], hoje: date,
     intervalo = intervalo_de(prazo_dias)
 
     if faltam < 0:
-        # vencido e ainda na raia: insiste todo dia até alguém mover o card. É o pior
+        # vencido e ainda na raia: insiste todo DIA ÚTIL até alguém mover o card. É o pior
         # cenário do sistema — não pode virar um aviso único que passe despercebido.
-        return Decisao(avisar=not ja_avisou_hoje, faltam=faltam, vencido=True)
-    avisar = (faltam % intervalo == 0) and not ja_avisou_hoje
-    return Decisao(avisar=avisar, faltam=faltam,
-                   ultima_chance=(faltam == intervalo))
+        return Decisao(avisar=eh_dia_util(hoje) and not ja_avisou_hoje,
+                       faltam=faltam, vencido=True)
+
+    if not _dispara_em(limite, hoje, intervalo):
+        return Decisao(avisar=False, faltam=faltam)
+    return Decisao(
+        avisar=not ja_avisou_hoje,
+        faltam=faltam,
+        # "última chance" = não há mais nenhum aviso agendado antes do vencimento. Definir
+        # assim (em vez de "faltam == intervalo") mantém o alerta correto quando o próprio
+        # vencimento cai em fim de semana e a sexta passa a ser o último aviso possível.
+        ultima_chance=faltam > 0 and not _ha_aviso_antes_do_vencimento(limite, hoje, intervalo),
+        antecipado=(faltam % intervalo != 0),
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -120,6 +172,8 @@ def formatar_aviso(linha: dict, d: Decisao) -> str:
     linhas = [topo] + _cabecalho(linha)
     linhas.append(f"<b>Vencimento:</b> {_esc(linha.get('data_limite'))}")
     linhas.append(f"<b>Kanban:</b> {_esc(STATUS_AGUARDANDO)}")
+    if d.antecipado:
+        linhas.append("📅 <i>Aviso antecipado: a verificação cairia em fim de semana.</i>")
     if d.vencido:
         linhas.append("👉 Mover o card para encerrar os avisos.")
     elif d.ultima_chance or d.faltam == 0:

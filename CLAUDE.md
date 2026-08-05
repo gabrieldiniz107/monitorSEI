@@ -99,7 +99,7 @@ python -m seibot.monitor run        # detecta novos e notifica no Teams
 python -m seibot.monitor prazos     # Fase 3: avisos de prazo (1x/dia, nao acessa o SEI)
 python -m seibot.monitor tratar --modo completo --doc-id 16067648   # alveja UMA intimação
 python validar_login.py             # valida só o login (teste do Turnstile headless)
-pytest -q                           # 179 testes (parser/classificar/store/notify/monitor/clientes/…)
+pytest -q                           # 181 testes (parser/classificar/store/notify/monitor/clientes/…)
 ```
 
 Parser e classificador são **puros** (testáveis sem browser). A fixture real
@@ -525,14 +525,27 @@ abaixo de 5, avisa todo dia. `prazo_dias` nulo (as 10 linhas recuperadas pelo ba
 só trouxe a data) também cai em diário — na dúvida, insiste.
 
 ⚠️ **A cadência é ancorada no VENCIMENTO**, não na ciência: avisa quando
-`dias_restantes % intervalo == 0`. Assim **sempre existe verificação no dia do vencimento**
-(`faltam == 0`). Consequência a não estranhar: num prazo de 22 dias (intervalo 4) o primeiro
-aviso sai quando faltam 20, não 22. Cadência em **dias corridos** — a data limite já vem
-pronta da Anatel, então não se depende de tabela de feriados.
+`dias_restantes % intervalo == 0`. Assim **o dia do vencimento sempre é coberto**. Consequência
+a não estranhar: num prazo de 22 dias (intervalo 4) o primeiro aviso sai quando faltam 20, não
+22. Cadência em **dias corridos** — a data limite já vem pronta da Anatel, então não se depende
+de tabela de feriados.
 
-Estados do aviso: normal (`⏳ faltam N`), **última chance** (`faltam == intervalo` — é o
-gancho onde a automação futura de **defesa/dilação de prazo** vai se plugar), vencimento
-(`🔴 VENCE HOJE`) e **vencido** (`🆘`, diário até moverem o card).
+⚠️ **Aviso que cairia em sábado/domingo é ANTECIPADO para a sexta anterior** (decisão do
+usuário, 2026-08-05). **Antecipar preserva o prazo restante; empurrar para segunda o
+consumiria** — e era justamente o alerta mais crítico que caía em fim de semana (simulado: num
+prazo de 20 dias iniciado numa sexta, a "última chance" caía num domingo). A mensagem sinaliza
+`📅 Aviso antecipado`. Prazo **vencido** também só é avisado em dia útil — como ele insiste
+diariamente, a segunda cobre o fim de semana.
+
+Estados do aviso: normal (`⏳ faltam N`), **última chance**, vencimento (`🔴 VENCE HOJE`) e
+**vencido** (`🆘`, diário até moverem o card).
+
+**"Última chance"** = não há mais nenhum aviso agendado **estritamente antes** do dia do
+vencimento (`prazos._ha_aviso_antes_do_vencimento`). Definir assim — e não como
+`faltam == intervalo` — foi necessário em dois casos: quando o próprio vencimento cai em fim
+de semana (a sexta vira o último aviso possível) e quando o último checkpoint pré-vencimento é
+antecipado. O dia do vencimento **não** conta como "mais um aviso", porque ali já é tarde para
+montar defesa ou pedir dilação. É o gancho da automação futura de **defesa/dilação de prazo**.
 
 **Sem card no Kanban** → avisa o grupo e encerra o acompanhamento: sem raia não dá para
 saber se ainda está pendente. (Acontece com tratativas anteriores a 22/07, quando a feature
@@ -555,14 +568,10 @@ não da automação. As candidatas continuam `Pendente` e são pegas na segunda;
 segue aberta e a reconciliação **não** dispara falso alarme (ela só avisa quando o grupo
 deixou de ser candidato).
 
-⚠️ **Feriados não são considerados** — só sábado/domingo (`datas.eh_dia_util`). Uma tabela de
-feriados nacionais/municipais precisaria ser mantida à mão e erraria em silêncio ao
-desatualizar. Enquanto isso, o bot **pode dar ciência num feriado**.
-
-⚠️ **Aviso de prazo pode cair em fim de semana.** A cadência é em dias corridos, então num
-prazo de 20 dias iniciado numa sexta a "última chance" cai num domingo (simulado ao vivo).
-Antecipar esses avisos para o dia útil anterior (sexta) preservaria o tempo restante —
-empurrar para segunda o consumiria. Decisão pendente com o usuário.
+⚠️ **Feriados não são considerados** — só sábado/domingo (`datas.eh_dia_util`), decisão
+consciente do usuário (2026-08-05). Uma tabela de feriados nacionais/municipais precisaria ser
+mantida à mão e erraria em silêncio ao desatualizar. Enquanto isso, o bot **pode dar ciência
+num feriado** e **pode avisar prazo em feriado**.
 
 ### Card do ofício no Kanban do Jurídico (feature 2026-07-22)
 
