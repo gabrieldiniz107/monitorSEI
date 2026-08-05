@@ -10,7 +10,17 @@ from seibot.store import IntimacoesStore
 
 
 def _cfg(**over):
-    return replace(Config(), **over)
+    """Config de teste com TODO canal de saída em branco.
+
+    `Config` avalia `os.getenv(...)` nos defaults de campo (no import, logo após o
+    `load_dotenv`), então um `Config()` nu dentro do teste É a config de produção. Sem
+    zerar isto aqui, `test_erro_ao_enviar_nao_marca_e_reenvia` faz `monitor.executar`
+    chamar `erros.notificar_erro` → DM REAL no Teams do responsável técnico (aconteceu
+    em 05/08/2026: dois alertas "ofício 10/20 · P10/P20" saíram de uma rodada de pytest).
+    """
+    egresso = dict(teams_dev_email="", teams_webhook_erros_url="", teams_webhook_url="",
+                   powerautomate_rascunho_url="")
+    return replace(Config(), **{**egresso, **over})
 
 
 def _intim(doc_id, cnpj, tipo="Requerimento de Informações"):
@@ -80,3 +90,157 @@ def test_guarda_anti_massa_com_banco_vazio(tmp_path, monkeypatch):
     assert res["status"] == "abortado_seed"
     assert enviados == []
     assert store.contar() == 0
+
+
+# ---------------------------------------------------------------------------
+# Promessa de tratativa: o `run` registra o que prometeu ao Jurídico
+# ---------------------------------------------------------------------------
+from seibot.clientes import ClienteInfo
+from seibot.store import PROMESSA_ABERTA
+
+
+class _Clientes:
+    def __init__(self, mapa):
+        self._mapa = mapa
+
+    def info(self, cnpj):
+        return self._mapa.get(cnpj)
+
+    def status(self, cnpj):
+        i = self.info(cnpj)
+        return None if i is None else ("ativo" if i.ativo else "inativo")
+
+    def emails(self, cnpj):
+        return []
+
+
+def _ativo(cnpj):
+    return ClienteInfo(cnpj=cnpj, em_base=True, status_raw="Ativo")
+
+
+def _inadimplente(cnpj):
+    return ClienteInfo(cnpj=cnpj, em_base=True, status_raw="Ativo",
+                       adimplencia="inadimplente", adimplencia_detalhe="Inadimplente 2 Parcelas")
+
+
+def test_run_registra_promessa_so_para_individual_tratavel(tmp_path, monkeypatch):
+    """Mesma condição que `notify._decisao_individual` usa para prometer no Teams.
+    INTIMS = ofício 10 coletivo (111+222) + ofício 20 individual (333)."""
+    monkeypatch.setattr(monitor.intimacoes, "coletar", _fake_coletar(INTIMS))
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    cli = _Clientes({"111": _ativo("111"), "222": _ativo("222"), "333": _ativo("333")})
+
+    res = monitor.executar(_cfg(), page=None, store=store, enviar=lambda g: None,
+                           clientes=cli, log=lambda *a: None)
+    assert res["prometidos"] == 1                      # só o individual
+    (p,) = store.promessas_abertas()
+    assert p["doc_id"] == "20" and p["estado"] == PROMESSA_ABERTA
+
+
+def test_run_nao_promete_individual_inadimplente(tmp_path, monkeypatch):
+    monkeypatch.setattr(monitor.intimacoes, "coletar", _fake_coletar(INTIMS))
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    cli = _Clientes({"111": _ativo("111"), "222": _ativo("222"), "333": _inadimplente("333")})
+
+    res = monitor.executar(_cfg(), page=None, store=store, enviar=lambda g: None,
+                           clientes=cli, log=lambda *a: None)
+    assert res["prometidos"] == 0 and store.promessas_abertas() == []
+
+
+def test_run_sem_sharepoint_nao_promete(tmp_path, monkeypatch):
+    monkeypatch.setattr(monitor.intimacoes, "coletar", _fake_coletar(INTIMS))
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    res = monitor.executar(_cfg(), page=None, store=store, enviar=lambda g: None,
+                           clientes=None, log=lambda *a: None)
+    assert res["prometidos"] == 0
+
+
+def test_promessa_so_depois_do_envio_bem_sucedido(tmp_path, monkeypatch):
+    """Se o Teams não recebeu, não houve promessa — senão o `tratar` cobraria uma
+    tratativa que o Jurídico nunca viu prometida."""
+    monkeypatch.setattr(monitor.intimacoes, "coletar", _fake_coletar(INTIMS))
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    cli = _Clientes({"111": _ativo("111"), "222": _ativo("222"), "333": _ativo("333")})
+
+    def quebra(_g):
+        raise RuntimeError("webhook fora")
+
+    res = monitor.executar(_cfg(), page=None, store=store, enviar=quebra,
+                           clientes=cli, log=lambda *a: None)
+    assert res["prometidos"] == 0 and store.promessas_abertas() == []
+
+
+# ---------------------------------------------------------------------------
+# Reconciliação: nenhuma promessa termina a execução sem destino
+# ---------------------------------------------------------------------------
+def _captura_teams(monkeypatch) -> list:
+    """`_reconciliar_promessas` importa `enviar_teams_webhook` de dentro da função,
+    então o patch no atributo do módulo pega."""
+    enviadas = []
+    import seibot.teams as teams_mod
+    monkeypatch.setattr(teams_mod, "enviar_teams_webhook",
+                        lambda url, msg, style="text", **k: enviadas.append(msg))
+    return enviadas
+
+
+def test_reconciliar_quita_promessa_tratada(tmp_path, monkeypatch):
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    intim = _intim("20", "333")
+    store.registrar_promessa(intim, "Ofício 20")
+    grupos = monitor.classificar.agrupar_por_oficio([intim])
+
+    monitor._reconciliar_promessas(_cfg(), store, grupos, _Clientes({"333": _ativo("333")}),
+                                   {intim.chave}, log=lambda *a: None)
+    assert store.promessas_abertas() == []
+
+
+def test_reconciliar_avisa_o_grupo_quando_a_situacao_mudou(tmp_path, monkeypatch):
+    """O caso da Age Telecomunicações: prometida às 07:00, deixou de ser candidata às
+    07:10, e antes disso ninguém ficava sabendo."""
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    prometida = _intim("20", "333")
+    store.registrar_promessa(prometida, "Ofício 20")
+    # na raspagem do `tratar` ela aparece já Respondida
+    agora = replace(prometida, situacao="Respondida")
+    grupos = monitor.classificar.agrupar_por_oficio([agora])
+
+    enviadas = _captura_teams(monkeypatch)
+    n = monitor._reconciliar_promessas(_cfg(teams_webhook_url="https://webhook"), store,
+                                       grupos, _Clientes({"333": _ativo("333")}),
+                                       set(), log=lambda *a: None)
+    assert n == 1
+    assert "NÃO executada" in enviadas[0] and "Respondida" in enviadas[0]
+    assert store.promessas_abertas() == []   # quitada como descartada
+
+
+def test_reconciliar_avisa_uma_vez_quando_saiu_da_janela(tmp_path, monkeypatch):
+    """Sumiu da raspagem: avisa, mas mantém aberta (pode voltar) e não repete o aviso."""
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    store.registrar_promessa(_intim("20", "333"), "Ofício 20")
+
+    enviadas = _captura_teams(monkeypatch)
+    cfg = _cfg(teams_webhook_url="https://webhook")
+
+    assert monitor._reconciliar_promessas(cfg, store, [], _Clientes({}), set(),
+                                          log=lambda *a: None) == 1
+    assert "saiu da janela" in enviadas[0]
+    assert len(store.promessas_abertas()) == 1           # segue aberta
+
+    assert monitor._reconciliar_promessas(cfg, store, [], _Clientes({}), set(),
+                                          log=lambda *a: None) == 0
+    assert len(enviadas) == 1                            # não repetiu
+
+
+def test_reconciliar_nao_avisa_quando_ainda_eh_candidata(tmp_path, monkeypatch):
+    """Ainda candidata = falhou na tratativa; isso já vira DM técnica. Não duplicar no grupo."""
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    intim = _intim("20", "333")
+    store.registrar_promessa(intim, "Ofício 20")
+    grupos = monitor.classificar.agrupar_por_oficio([intim])
+
+    enviadas = _captura_teams(monkeypatch)
+    n = monitor._reconciliar_promessas(_cfg(teams_webhook_url="https://webhook"), store,
+                                       grupos, _Clientes({"333": _ativo("333")}),
+                                       set(), log=lambda *a: None)
+    assert n == 0 and enviadas == []
+    assert len(store.promessas_abertas()) == 1

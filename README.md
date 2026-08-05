@@ -69,6 +69,7 @@ união: `StatusContrato=Ativo` na lista *Clientes SCM* OU contrato *Ativo* na li
 ```bash
 python -m seibot.monitor tratar --modo ensaio                  # só lista candidatos
 python -m seibot.monitor tratar --modo completo --processo NNN # ensaio-geral (sem ciência)
+python -m seibot.monitor tratar --modo completo --doc-id NNN   # idem, alvejando 1 intimação
 python -m seibot.monitor tratar --modo real                    # produção — DÁ CIÊNCIA
 ```
 Para cada intimação **nova + individual + cliente ATIVO + Pendente**: abre o processo,

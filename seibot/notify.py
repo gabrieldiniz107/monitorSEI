@@ -140,6 +140,28 @@ def formatar_grupo_html(g: Grupo, clientes: Optional[BaseClientes] = None) -> st
     return corpo
 
 
+def formatar_promessa_nao_cumprida(promessa: dict, motivo: str) -> str:
+    """Aviso ao grupo do Jurídico: o `run` prometeu tratar e a tratativa NÃO aconteceu.
+
+    O grupo recebeu a promessa ("▶️ seguir com a tratativa individual"), então recebe
+    também o desmentido, com o motivo — decisão do usuário (2026-08-05). Erro TÉCNICO
+    continua indo só para a DM do responsável (`erros.notificar_erro`); isto aqui é
+    decisão de negócio (ciência humana, inadimplência, cadastro faltando) e é o Jurídico
+    quem resolve.
+    """
+    p = promessa
+    oficio = f"{p.get('oficio_desc') or 'Ofício'} ({p.get('doc_id')})"
+    linhas = [
+        "⚠️ <b>Tratativa automática NÃO executada</b>",
+        f"<b>Processo:</b> {_esc(p.get('processo'))}",
+        f"<b>Ofício:</b> {_esc(oficio)}",
+        f"<b>Empresa:</b> {_esc(p.get('empresa'))}",
+        f"<b>Motivo:</b> {_esc(motivo)}",
+        "👉 O cliente <b>não</b> foi notificado por e-mail. Tratar à mão.",
+    ]
+    return "<br>".join(linhas)
+
+
 def enviar_grupo(
     url: str,
     g: Grupo,

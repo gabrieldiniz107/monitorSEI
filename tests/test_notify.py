@@ -1,7 +1,7 @@
 """Testes de formatação das mensagens Teams."""
 from seibot.classificar import agrupar_por_oficio
 from seibot.models import Intimacao
-from seibot.notify import formatar_grupo
+from seibot.notify import formatar_grupo, formatar_promessa_nao_cumprida
 
 
 def _intim(cnpj, nome, tipo="Requerimento de Informações"):
@@ -135,3 +135,33 @@ def test_individual_ativo_sem_registro_financeiro_segue_tratativa():
     clientes = _ClientesFake({"111": ClienteInfo(cnpj="111", em_base=True, status_raw="Ativo",
                                                  adimplencia=None)})
     assert "tratativa individual" in formatar_grupo(g, clientes)
+
+
+# ---------------------------------------------------------------------------
+# Aviso ao grupo do Jurídico quando a tratativa prometida NÃO acontece
+# ---------------------------------------------------------------------------
+_PROMESSA = {
+    "processo": "53500.098046/2026-23", "doc_id": "16067648",
+    "oficio_desc": "Ofício 688", "empresa": "Age Telecomunicações S.A",
+}
+
+
+def test_promessa_nao_cumprida_traz_processo_oficio_empresa_e_motivo():
+    m = formatar_promessa_nao_cumprida(_PROMESSA, "situação mudou para 'Respondida'")
+    assert "NÃO executada" in m
+    assert "53500.098046/2026-23" in m
+    assert "Ofício 688 (16067648)" in m
+    assert "Age Telecomunicações S.A" in m
+    assert "situação mudou para 'Respondida'" in m
+    assert "Tratar à mão" in m
+
+
+def test_promessa_nao_cumprida_deixa_claro_que_o_cliente_nao_foi_avisado():
+    """É a informação acionável: quem lê precisa saber que o e-mail não saiu."""
+    m = formatar_promessa_nao_cumprida(_PROMESSA, "cliente INADIMPLENTE")
+    assert "não</b> foi notificado" in m
+
+
+def test_promessa_nao_cumprida_escapa_html():
+    m = formatar_promessa_nao_cumprida({**_PROMESSA, "empresa": "<script>x</script>"}, "m")
+    assert "<script>" not in m and "&lt;script&gt;" in m
