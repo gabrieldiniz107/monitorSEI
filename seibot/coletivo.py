@@ -139,6 +139,11 @@ def _aceites_de_pendente(page, grupo: Grupo, log) -> list:
     from . import processo
 
     pendentes = [i for i in grupo.destinatarios if i.situacao == SITUACAO_PENDENTE]
+    if not pendentes:
+        # ninguém Pendente ⇒ a ciência já foi dada e não há o que confirmar. Ler os ícones
+        # aqui seria pagar um POST por documento (o lote responde 500) para descobrir algo
+        # que a lista de intimações já diz — no ofício 682 isso são 16 chamadas inúteis.
+        return []
     for tentativa in range(1, TENTATIVAS_ACEITE + 1):
         try:
             aceites = processo.urls_aceite(page)

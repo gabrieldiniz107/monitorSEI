@@ -291,3 +291,25 @@ def test_erro_alheio_ao_ler_as_acoes_nao_e_engolido(monkeypatch):
     monkeypatch.setattr(real, "abrir_processo", lambda *a, **k: None)
     with pytest.raises(RuntimeError, match="browser has been closed"):
         coletivo._aceites_de_pendente(None, g, lambda *_: None)
+
+
+def test_sem_pendente_nem_le_os_icones(processo_fake):
+    """Sem destinatário Pendente a ciência já foi dada — ler os ícones custaria um POST por
+    documento (16 no ofício 682) para descobrir o que a lista de intimações já diz."""
+    import seibot.processo as real
+    g = _grupo(*[replace(_intim(str(n)), situacao="Cumprida por Consulta Direta")
+                 for n in range(3)])
+    leituras = {"n": 0}
+
+    def conta(page):
+        leituras["n"] += 1
+        return []
+
+    processo_fake(_PageFake([]))
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(real, "urls_aceite", conta)
+    try:
+        assert coletivo._aceites_de_pendente(None, g, lambda *_: None) == []
+        assert leituras["n"] == 0
+    finally:
+        monkey.undo()
