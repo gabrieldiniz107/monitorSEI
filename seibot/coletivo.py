@@ -129,6 +129,38 @@ def _dar_ciencia_de_todos(page, grupo: Grupo, store, log) -> int:
     return feitas
 
 
+# quantas releituras da página antes de desistir de achar o ícone de aceite
+TENTATIVAS_ACEITE = 3
+
+
+def _aceites_de_pendente(page, grupo: Grupo, log) -> list:
+    """Ícones de aceite, com releitura enquanto houver destinatário Pendente sem ícone.
+
+    ⚠️ "Sem ícone de aceite" é lido como **"ciência já dada"** — mas se o grupo ainda tem
+    destinatário `Pendente`, isso é uma contradição, não um estado. Quase sempre é o
+    lazy-load da coluna "Ações" que não resolveu (ver `processo._aceites_lazy`), e reabrir
+    resolve. Seguir em frente é o pior desfecho possível: o bot conclui que já houve
+    ciência, falha adiante em "ofício não achado na Lista de Protocolos", e a intimação
+    continua Pendente sem ninguém ter dado ciência — foi o que aconteceu com os ofícios
+    682 e 666 no lote de 07/08/2026. Melhor abortar alto e retentar no ciclo seguinte.
+    """
+    from . import processo
+
+    pendentes = [i for i in grupo.destinatarios if i.situacao == SITUACAO_PENDENTE]
+    for tentativa in range(1, TENTATIVAS_ACEITE + 1):
+        aceites = processo.urls_aceite(page)
+        if aceites or not pendentes:
+            return aceites
+        log(f"   ⚠️ {len(pendentes)} destinatário(s) Pendente(s) e nenhum ícone de aceite "
+            f"(tentativa {tentativa}/{TENTATIVAS_ACEITE}) — recarregando a página…")
+        if tentativa < TENTATIVAS_ACEITE:
+            processo.abrir_processo(page, grupo.destinatarios[0].consulta_url)
+    raise RuntimeError(
+        f"ofício {grupo.doc_id}: {len(pendentes)} destinatário(s) Pendente(s) mas nenhum "
+        f"ícone de aceite após {TENTATIVAS_ACEITE} leituras — abortado sem tocar nele "
+        "(seguir daqui seria concluir, errado, que a ciência já foi dada).")
+
+
 def tratar_coletivo(sess, cfg, grupo: Grupo, clientes, store, g_graph, *,
                     dar_ciencia: bool = False, publicar: bool = True,
                     url_teams: Optional[str] = None, log=print) -> dict:
@@ -142,7 +174,7 @@ def tratar_coletivo(sess, cfg, grupo: Grupo, clientes, store, g_graph, *,
 
     processo.abrir_processo(page, intim.consulta_url)
 
-    aceites = processo.urls_aceite(page)
+    aceites = _aceites_de_pendente(page, grupo, log)
 
     ciencia_dada = 0
     if aceites:

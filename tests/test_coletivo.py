@@ -237,3 +237,33 @@ def test_clique_sem_desfecho_grava_checkpoint_e_vira_falha_pos_ciencia(processo_
                                  dar_ciencia=True, log=lambda *_: None)
     # as NOVE empresas ficam registradas: o prazo já corre para todas
     assert len(store.tratados) == 9
+
+
+# ------------------------------------------- Pendente sem ícone de aceite é contradição
+def test_pendente_sem_icone_de_aceite_recarrega_e_depois_aborta(processo_fake):
+    """Ofícios 682 e 666 (lote de 07/08/2026): `urls_aceite` voltou vazio com destinatários
+    ainda Pendentes. O código seguia como "ciência já dada" e quebrava adiante em "ofício
+    não achado na Lista de Protocolos" — deixando a intimação Pendente sem ninguém ter dado
+    ciência. Agora relê a página e, se insistir, aborta alto."""
+    g = _grupo(*[_intim(str(n)) for n in range(3)])          # todos Pendente
+    page = _PageFake([[], [], []])
+    processo_fake(page)
+    with pytest.raises(RuntimeError, match="nenhum ícone de aceite após"):
+        coletivo._aceites_de_pendente(page, g, lambda *_: None)
+
+
+def test_pendente_sem_icone_aceita_o_que_a_releitura_trouxer(processo_fake):
+    g = _grupo(*[_intim(str(n)) for n in range(3)])
+    page = _PageFake([[], _ACEITE])          # a 2ª leitura já traz o ícone
+    processo_fake(page)
+    assert coletivo._aceites_de_pendente(page, g, lambda *_: None) == _ACEITE
+
+
+def test_sem_pendente_e_sem_icone_segue_normal(processo_fake):
+    """Coletivo já cumprido: vazio é o estado correto, não relê nem aborta."""
+    from dataclasses import replace
+    g = _grupo(*[replace(_intim(str(n)), situacao="Cumprida por Consulta Direta")
+                 for n in range(3)])
+    page = _PageFake([[]])
+    processo_fake(page)
+    assert coletivo._aceites_de_pendente(page, g, lambda *_: None) == []
