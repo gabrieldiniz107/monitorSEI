@@ -28,10 +28,6 @@ from typing import Optional
 from .models import Grupo
 from .tratativa import SITUACAO_PENDENTE, TratativaIncompleta
 
-# teto do laço de ciência: no pior caso (ciência por destinatário) são N aceites; a folga
-# de +1 dá margem sem virar laço infinito se a página parar de mudar.
-FOLGA_CIENCIA = 1
-
 # por que o coletivo sai do acompanhamento de prazos assim que é registrado
 MOTIVO_SEM_CARD = "coletivo — sem card no Kanban, prazo acompanhado pelo Jurídico"
 
@@ -63,11 +59,10 @@ def selecionar_candidatos(grupos, store=None) -> list:
 
 
 def mapear(sess, grupo: Grupo, log=print) -> dict:
-    """READ-ONLY: abre a página e conta os ícones de aceite. **Não clica em nada.**
+    """READ-ONLY: abre a página e lista os ícones de aceite. **Não clica em nada.**
 
-    Existe para responder, sem risco, a pergunta que decide o laço de ciência: um aceite
-    cobre todos os destinatários do coletivo, ou há um por empresa? (A lista de intimações
-    mostra grupos com situação mista, o que deixa a resposta ambígua no HTML da listagem.)
+    Diagnóstico: quantos documentos a intimação tem, quais são, e quantos `id_intimacao[]`
+    a URL do aceite carrega (é isso que prova que uma confirmação cobre todo o coletivo).
     """
     from . import processo
 
@@ -86,47 +81,44 @@ def mapear(sess, grupo: Grupo, log=print) -> dict:
         log(f"    • doc {a.get('num') or '?'}"
             + ("  [documento principal]" if a.get("principal") else "")
             + f"\n      {a.get('url', '')[:160]}")
-    log("  ⇒ se nº de aceites ~= nº de documentos da intimação, UMA ciência cobre todos;\n"
-        "    se ~= nº de empresas Pendentes, a ciência é por destinatário (o laço cobre).")
+    log("  ⇒ a URL do aceite lista os id_intimacao[] cobertos por UMA confirmação.")
     return {"destinatarios": len(grupo.destinatarios), "pendentes": len(pendentes),
             "aceites": len(aceites),
             "docs": [a.get("num") for a in aceites],
             "situacoes": sorted({i.situacao for i in grupo.destinatarios})}
 
 
-def _dar_ciencia_de_todos(page, grupo: Grupo, store, log) -> int:
-    """Dá ciência até não sobrar ícone de aceite. Devolve quantas confirmações foram feitas.
+def _dar_ciencia_uma_vez(page, grupo: Grupo, aceites: list, store, log) -> int:
+    """Confirma UMA vez — que cumpre a intimação para todos os destinatários.
 
-    **Autocorretivo de propósito.** Não se sabe ao certo se uma confirmação cumpre a
-    intimação para todos os destinatários do coletivo ou só para um: as linhas do mesmo
-    ofício compartilham `id_intimacao`/`id_acesso_externo`, mas a Situação é por
-    destinatário e existem grupos com estado misto. Reler a página depois de cada
-    confirmação funciona nos dois casos — 1 volta se cobre todos, N se não cobre.
+    Antes isto era um laço autocorretivo (confirmar → reler → repetir até zerar), escrito
+    quando ainda não se sabia se uma confirmação cobria o coletivo inteiro. **Agora se sabe
+    que cobre**: a URL do aceite carrega TODOS os `id_intimacao[]` pendentes, e no ofício 693
+    (07/08/2026) uma confirmação gerou as 8 certidões de uma vez.
+
+    ⚠️ E reler custa caro: cada leitura dos ícones dispara um POST por documento no endpoint
+    das Ações (o lote responde 500 — ver `processo._aceites_lazy`). No ofício 682, com 16
+    placeholders num processo de 138 linhas, o laço levou dezenas de minutos e teve de ser
+    interrompido à mão. A conferência agora é a que o `_apos_ciencia` já faz de graça: se a
+    Lista de Protocolos continuar vazia, a ciência não pegou e ele aborta.
     """
     from . import processo
 
-    intim = grupo.destinatarios[0]
-    teto = len(grupo.destinatarios) + FOLGA_CIENCIA
-    feitas = 0
-    while True:
-        aceites = processo.urls_aceite(page)
-        if not aceites:
-            break
-        if feitas >= teto:
-            raise RuntimeError(
-                f"laço de ciência excedeu {teto} confirmações e a página ainda mostra "
-                f"{len(aceites)} aceite(s) — abortado para não clicar indefinidamente.")
-        alvo = processo.escolher_aceite(aceites, grupo.doc_id)
-        log(f"   ⚠️ DANDO CIÊNCIA ({feitas + 1}ª; doc {alvo.get('num') or '?'}) — irreversível…")
-        processo.dar_ciencia(page, alvo["url"])
-        feitas += 1
-        if feitas == 1:
-            # checkpoint imediato p/ TODOS os destinatários: se o pipeline quebrar daqui pra
-            # frente, nenhuma empresa deste ofício é re-tratada (ciência dupla).
-            for i in grupo.destinatarios:
-                store.marcar_tratado(i, "")
-        processo.abrir_processo(page, intim.consulta_url)   # recarrega com os links vivos
-    return feitas
+    alvo = processo.escolher_aceite(aceites, grupo.doc_id)
+    log(f"   ⚠️ DANDO CIÊNCIA (doc {alvo.get('num') or '?'}) — irreversível…")
+    processo.dar_ciencia(page, alvo["url"])
+    # checkpoint imediato p/ TODOS os destinatários: se o pipeline quebrar daqui pra frente,
+    # nenhuma empresa deste ofício é re-tratada (ciência dupla).
+    for i in grupo.destinatarios:
+        store.marcar_tratado(i, "")
+    processo.abrir_processo(page, grupo.destinatarios[0].consulta_url)  # links vivos
+
+    # conferência de graça: só o DOM, sem disparar o endpoint das Ações de novo
+    restantes = processo.aceites_no_dom(page)
+    if restantes:
+        log(f"   ⚠️ ainda há {len(restantes)} ícone(s) de aceite na página — NÃO vou repetir. "
+            "Conferir no SEI se alguma empresa ficou Pendente.")
+    return 1
 
 
 # quantas releituras da página antes de desistir de achar o ícone de aceite
@@ -194,7 +186,7 @@ def tratar_coletivo(sess, cfg, grupo: Grupo, clientes, store, g_graph, *,
                 f"ofício {grupo.doc_id} ainda PENDENTE (aceite não dado) e dar_ciencia=False "
                 "— sem ciência não há Lista de Protocolos. Abortado sem tocar nele.")
         try:
-            ciencia_dada = _dar_ciencia_de_todos(page, grupo, store, log)
+            ciencia_dada = _dar_ciencia_uma_vez(page, grupo, aceites, store, log)
         except processo.CienciaIncerta as e:
             # assume que a ciência saiu: grava o checkpoint (senão o registro se perde e o
             # ofício some da seleção sem rastro) e alerta como falha pós-ciência.

@@ -274,6 +274,15 @@ def _aceites_lazy(page) -> list[dict]:
     return achados
 
 
+def aceites_no_dom(page) -> list[dict]:
+    """Só o que já está renderizado no DOM — **não** dispara o endpoint das Ações.
+
+    Leitura barata, para conferir se sobrou ícone depois da ciência. Não serve para decidir
+    "há aceite?" (o lazy pode não ter carregado ainda) — para isso use `urls_aceite`.
+    """
+    return page.evaluate(_JS_ACEITES_DOM) or []
+
+
 def urls_aceite(page) -> list[dict]:
     """Ícones de aceite da intimação (só existem enquanto ela está PENDENTE).
 
@@ -284,7 +293,7 @@ def urls_aceite(page) -> list[dict]:
     pelo endpoint (`_aceites_lazy`). Sem esse complemento, processo grande = falso "já
     cumprida".
     """
-    achados = page.evaluate(_JS_ACEITES_DOM) or []
+    achados = aceites_no_dom(page)
     vistos = {a["url"] for a in achados}
     achados += [a for a in _aceites_lazy(page) if a["url"] not in vistos]
     return achados

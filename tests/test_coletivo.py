@@ -89,6 +89,9 @@ class _ProcessoFake:
     def urls_aceite(self, page):
         return page.proximo()
 
+    def aceites_no_dom(self, page):
+        return page.proximo()
+
     def dar_ciencia(self, page, url):
         page.cliques.append(url)
 
@@ -101,7 +104,7 @@ def processo_fake(monkeypatch):
     def instalar(page):
         fake = _ProcessoFake(page)
         import seibot.processo as real
-        for nome in ("urls_aceite", "dar_ciencia", "abrir_processo"):
+        for nome in ("urls_aceite", "aceites_no_dom", "dar_ciencia", "abrir_processo"):
             monkeypatch.setattr(real, nome, getattr(fake, nome))
         return fake
     return instalar
@@ -118,54 +121,42 @@ class _StoreFake:
 _ACEITE = [{"url": "u1", "num": "999", "principal": True}]
 
 
-def test_uma_ciencia_cobre_todos_para_o_laco_na_primeira_volta(processo_fake):
+def test_uma_confirmacao_cobre_todos_os_destinatarios(processo_fake):
+    """Confirmar UM documento cumpre a intimação inteira — a URL do aceite carrega todos os
+    `id_intimacao[]`. Validado no ofício 693 (07/08/2026): 1 confirmação, 8 certidões."""
     g = _grupo(*[_intim(str(n)) for n in range(9)])
-    page = _PageFake([_ACEITE, []])       # depois de 1 confirmação, some tudo
+    page = _PageFake([[]])                      # a conferência pós-ciência não acha sobra
     processo_fake(page)
     store = _StoreFake()
 
-    assert coletivo._dar_ciencia_de_todos(page, g, store, lambda *_: None) == 1
-    # o checkpoint cobre as NOVE empresas, não só a primeira
-    assert len(store.tratados) == 9
+    assert coletivo._dar_ciencia_uma_vez(page, g, _ACEITE, store, lambda *_: None) == 1
+    assert page.cliques == ["u1"]               # UMA vez, não N
+    assert len(store.tratados) == 9             # o checkpoint cobre as NOVE empresas
 
 
-def test_ciencia_por_destinatario_repete_ate_zerar(processo_fake):
-    g = _grupo(_intim("1"), _intim("2"), _intim("3"))
-    page = _PageFake([_ACEITE, _ACEITE, _ACEITE, []])
+def test_nao_repete_a_ciencia_mesmo_com_icone_sobrando(processo_fake):
+    """Antes isto era um laço que reconfirmava até zerar. Cada releitura dispara um POST por
+    documento no endpoint das Ações, e no ofício 682 (138 linhas, 16 placeholders) isso levou
+    dezenas de minutos até ser interrompido à mão. Agora avisa e para."""
+    g = _grupo(*[_intim(str(n)) for n in range(9)])
+    page = _PageFake([_ACEITE])                 # ainda há ícone depois da confirmação
     processo_fake(page)
+    avisos = []
 
-    assert coletivo._dar_ciencia_de_todos(page, g, _StoreFake(), lambda *_: None) == 3
-    assert page.cliques == ["u1", "u1", "u1"]
-
-
-def test_checkpoint_e_gravado_uma_unica_vez(processo_fake):
-    g = _grupo(_intim("1"), _intim("2"))
-    page = _PageFake([_ACEITE, _ACEITE, []])
-    processo_fake(page)
-    store = _StoreFake()
-
-    coletivo._dar_ciencia_de_todos(page, g, store, lambda *_: None)
-    assert len(store.tratados) == 2   # 2 empresas × 1 checkpoint, não 2 × 2 voltas
+    assert coletivo._dar_ciencia_uma_vez(page, g, _ACEITE, _StoreFake(), avisos.append) == 1
+    assert page.cliques == ["u1"]
+    assert any("NÃO vou repetir" in a for a in avisos)
 
 
-def test_pagina_que_nunca_zera_aborta_no_teto(processo_fake):
-    """Sem teto isto seria um laço infinito clicando em 'confirmar' — o pior cenário
-    possível numa ação irreversível."""
-    g = _grupo(_intim("1"), _intim("2"))
-    page = _PageFake([_ACEITE] * 20)
-    processo_fake(page)
-
-    with pytest.raises(RuntimeError, match="laço de ciência excedeu"):
-        coletivo._dar_ciencia_de_todos(page, g, _StoreFake(), lambda *_: None)
-    assert len(page.cliques) == len(g.destinatarios) + coletivo.FOLGA_CIENCIA
-
-
-def test_sem_aceite_nenhum_nao_clica(processo_fake):
+def test_alvo_da_ciencia_e_o_documento_do_oficio(processo_fake):
     g = _grupo(_intim("1"), _intim("2"))
     page = _PageFake([[]])
     processo_fake(page)
-    assert coletivo._dar_ciencia_de_todos(page, g, _StoreFake(), lambda *_: None) == 0
-    assert page.cliques == []
+    aceites = [{"url": "outro", "num": "111", "principal": False},
+               {"url": "certo", "num": g.doc_id, "principal": False}]
+
+    coletivo._dar_ciencia_uma_vez(page, g, aceites, _StoreFake(), lambda *_: None)
+    assert page.cliques == ["certo"]
 
 
 # --------------------------------------------------------------- mensagem do Teams
