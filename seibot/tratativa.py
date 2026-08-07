@@ -139,9 +139,15 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
             raise RuntimeError(
                 f"intimação {grupo.doc_id} ainda PENDENTE (aceite não dado) e dar_ciencia=False "
                 "— sem ciência não há Lista de Protocolos nem prazo. Abortado sem tocar nela.")
-        alvo = next((a for a in aceites if a["principal"]), aceites[0])
+        alvo = processo.escolher_aceite(aceites, grupo.doc_id)
         log(f"   ⚠️ DANDO CIÊNCIA (doc {alvo['num']}) — inicia o prazo…")
-        processo.dar_ciencia(page, alvo["url"])
+        try:
+            processo.dar_ciencia(page, alvo["url"])
+        except processo.CienciaIncerta as e:
+            # assume que saiu: sem o checkpoint o prazo correria com o registro perdido.
+            store.marcar_tratado(intim, "")
+            raise TratativaIncompleta(str(e), processo=grupo.processo,
+                                      empresa=intim.destinatario) from e
         ciencia_dada = True
         store.marcar_tratado(intim, "")   # checkpoint: ciência dada, prazo já corre
         processo.abrir_processo(page, intim.consulta_url)  # recarrega já com os links vivos

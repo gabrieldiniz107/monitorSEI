@@ -1,4 +1,6 @@
 """Testes dos parsers puros do Increment 3 (anexos + prazo)."""
+import pytest
+
 from seibot.processo import (Prazo, anexos_da_intimacao, eh_pdf, extrair_anexos,
                              extrair_texto_oficio, parse_prazo)
 
@@ -252,7 +254,7 @@ class _FakeReq:
     def __init__(self, body):
         self._body = body
 
-    def get(self, url):
+    def get(self, url, **kw):
         return _FakeResp(self._body)
 
 
@@ -291,3 +293,141 @@ def test_baixar_como_pdf_html_gerado_no_sei_e_renderizado():
     out = _p.baixar_como_pdf(page, ctx, "/doc?id=13227283")
     assert out == b"%PDF-1.7 renderizado"    # virou PDF de verdade
     assert page.pdf_gotos                     # navegou para renderizar
+
+
+# ---------------------------------------------------------------------------
+# Ícones de aceite: DOM + lazy-load da coluna "Ações"
+#
+# Achado de 2026-08-07 (coletivo 693, proc 53500.101985/2026-62): a coluna "Ações" não vem
+# no HTML — é carregada por AJAX, um documento por vez, em cadeia. Num processo com ~105
+# documentos a cadeia não termina antes de o `abrir_processo` ler a página, e `urls_aceite`
+# devolvia [] ⇒ o bot concluía "ciência já dada" e não tinha por onde entrar.
+# ---------------------------------------------------------------------------
+_ACEITE_URL = ("https://sei.anatel.gov.br/sei/controlador_externo.php?"
+               "acao=md_pet_intimacao_usu_ext_confirmar_aceite&id_documento=18009400"
+               "&id_intimacao[]=330635&id_intimacao[]=330650")
+
+
+class _PageAceites:
+    """Devolve o resultado do JS do DOM e o do lazy conforme o script chamado."""
+
+    def __init__(self, dom, lazy):
+        self._dom, self._lazy = dom, lazy
+        self.chamadas = 0
+
+    def evaluate(self, script, *a):
+        self.chamadas += 1
+        return self._lazy if "md-pet-acao-lazy" in script else self._dom
+
+
+def test_urls_aceite_usa_o_dom_quando_os_icones_ja_renderizaram():
+    page = _PageAceites([{"url": "/x?confirmar_aceite", "num": "16075320", "principal": True}],
+                        [])
+    assert _p.urls_aceite(page) == [
+        {"url": "/x?confirmar_aceite", "num": "16075320", "principal": True}]
+
+
+def test_urls_aceite_resolve_o_lazy_quando_o_dom_esta_vazio():
+    """O caso do 693: nenhum ícone no DOM, mas o endpoint devolve os botões."""
+    page = _PageAceites([], [
+        {"html": f"<a onclick=\"infraAbrirJanelaModal('{_ACEITE_URL}',900,470)\">"
+                 "<img src='.../intimacao_nao_cumprida_doc_anexo.svg'></a>",
+         "num": "16075320"},
+    ])
+    achados = _p.urls_aceite(page)
+    assert achados == [{"url": _ACEITE_URL, "num": "16075320", "principal": False}]
+
+
+def test_urls_aceite_nao_duplica_o_que_o_dom_ja_trouxe():
+    dom = [{"url": _ACEITE_URL, "num": "16075320", "principal": True}]
+    lazy = [{"html": f"<a onclick=\"infraAbrirJanelaModal('{_ACEITE_URL}')\"></a>",
+             "num": "16075320"}]
+    assert len(_p.urls_aceite(_PageAceites(dom, lazy))) == 1
+
+
+def test_urls_aceite_ignora_botao_que_nao_e_de_aceite():
+    """A coluna Ações também traz ícones de resposta/certidão — só o aceite interessa."""
+    lazy = [{"html": "<a onclick=\"infraAbrirJanelaModal('/x?acao=outra_coisa')\"></a>",
+             "num": "999"}]
+    assert _p.urls_aceite(_PageAceites([], lazy)) == []
+
+
+def test_urls_aceite_sobrevive_a_falha_do_lazy():
+    """Falha de rede no endpoint não pode derrubar a tratativa — devolve o que o DOM tinha."""
+    class _Quebrado(_PageAceites):
+        def evaluate(self, script, *a):
+            if "md-pet-acao-lazy" in script:
+                raise RuntimeError("net::ERR_ABORTED")
+            return self._dom
+
+    page = _Quebrado([{"url": "/y?confirmar_aceite", "num": "1", "principal": False}], [])
+    assert _p.urls_aceite(page) == [{"url": "/y?confirmar_aceite", "num": "1",
+                                     "principal": False}]
+
+
+def test_escolher_aceite_prefere_o_documento_do_oficio():
+    """No 693 os 4 ícones vieram com principal=False — o casamento por doc_id é o que resta."""
+    aceites = [{"url": "a", "num": "16075316", "principal": False},
+               {"url": "b", "num": "16075320", "principal": False}]
+    assert _p.escolher_aceite(aceites, "16075320")["url"] == "b"
+
+
+def test_escolher_aceite_cai_para_o_principal_e_depois_para_o_primeiro():
+    aceites = [{"url": "a", "num": "111", "principal": False},
+               {"url": "b", "num": "222", "principal": True}]
+    assert _p.escolher_aceite(aceites, "999")["url"] == "b"       # doc_id não casa
+    sem_principal = [{"url": "a", "num": "111", "principal": False}]
+    assert _p.escolher_aceite(sem_principal, "999")["url"] == "a"
+    assert _p.escolher_aceite([], "999") is None
+
+
+class _ReqInstavel:
+    """Falha nas primeiras chamadas e devolve o conteúdo na última."""
+    def __init__(self, falhas, body=b"%PDF-ok"):
+        self.falhas, self._body, self.chamadas = falhas, body, 0
+
+    def get(self, url, **kw):
+        self.chamadas += 1
+        if self.chamadas <= self.falhas:
+            raise RuntimeError("APIRequestContext.get: Request timed out after 30000ms")
+        return _FakeResp(self._body)
+
+
+def test_baixar_retenta_download_que_estourou(monkeypatch):
+    """Visto ao vivo no Ofício 693 (07/08/2026): documento grande passa do timeout padrão.
+    Falhar aqui é caro — é depois da ciência, com o prazo já correndo."""
+    monkeypatch.setattr(_p.time, "sleep", lambda s: None)
+    ctx = type("C", (), {})()
+    ctx.request = _ReqInstavel(falhas=2)
+    assert _p.baixar(ctx, "/doc?id=1") == b"%PDF-ok"
+    assert ctx.request.chamadas == 3
+
+
+def test_baixar_desiste_e_diz_quantas_tentou(monkeypatch):
+    monkeypatch.setattr(_p.time, "sleep", lambda s: None)
+    ctx = type("C", (), {})()
+    ctx.request = _ReqInstavel(falhas=9)
+    with pytest.raises(RuntimeError, match="falhou após 3 tentativas"):
+        _p.baixar(ctx, "/doc?id=1")
+
+
+def test_anexos_do_coletivo_saem_so_do_texto_do_oficio():
+    """Regra do COLETIVO (decisão do usuário, 07/08/2026), oposta à do individual.
+
+    Proc 53500.101985/2026-62, Ofício 693: o SEI empacotou 3 anexos na intimação, mas a
+    Planilha "Tabela ISPs/Domínios" (16075319) não é do ofício e não pode ir ao cliente. O
+    texto do ofício citava exatamente os 2 corretos. `coletivo._apos_ciencia` passa
+    docs_intimacao=None justamente para que só os citados entrem.
+    """
+    protos = {
+        "16075316": {"tipo": "Ofício SEI Nº 41178/2026/MF", "url": "u1"},
+        "16075317": {"tipo": "Planilha - Tabela Domínios", "url": "u2"},
+        "16075319": {"tipo": "Planilha - Tabela ISPs/Domínios", "url": "u3"},
+        "16075320": {"tipo": "Ofício 693 - Notificação Prestadoras", "url": "u4"},
+    }
+    citados = ["16075316", "16075317"]
+    assert anexos_da_intimacao(protos, "16075320", None, citados) == citados
+    # e a regra do individual, intocada, continua trazendo os 3 documentos da intimação
+    docs = ["16075316", "16075317", "16075319", "16075320"]
+    assert sorted(anexos_da_intimacao(protos, "16075320", docs)) == \
+        ["16075316", "16075317", "16075319"]

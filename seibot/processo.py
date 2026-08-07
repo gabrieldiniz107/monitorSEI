@@ -11,6 +11,10 @@ Mecânica validada ao vivo numa intimação PENDENTE real (2026-07-20, proc 5350
   `infraAbrirJanelaModal('…acao=md_pet_intimacao_usu_ext_confirmar_aceite&…')`. Essa tela
   explica o aceite e traz o botão **`#sbmAceitarIntimacao`** ("Confirmar Consulta à
   Intimação"). Confirmar UM documento cumpre a intimação inteira (mesmo `id_intimacao[]`).
+- ⚠️ **A coluna "Ações" não vem no HTML**: cada linha traz um placeholder
+  `.md-pet-acao-lazy` e um loader que busca os botões por AJAX, **um documento por vez, em
+  cadeia**. Em processo grande isso leva dezenas de segundos e o `abrir_processo` lê a
+  página antes — daí `urls_aceite` chamar o endpoint em lote (`_aceites_lazy`).
 - **Depois da ciência** os links viram `documento_consulta_externa.php?...&id_documento=X`,
   nasce a "Certidão de Intimação Cumprida" na lista e aparece o ícone de resposta.
 - Ofício: `documento_consulta_externa.php` → HTML (ISO-8859-1).
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import html as _html
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -188,30 +193,129 @@ def abrir_processo(page, consulta_url: str, tentativas: int = 3) -> None:
 BTN_ACEITAR = "#sbmAceitarIntimacao"
 
 
+_JS_ACEITES_DOM = """
+()=>[...document.querySelectorAll('a')].map(a=>{
+  const oc=a.getAttribute('onclick')||'';
+  const m=oc.match(/infraAbrirJanelaModal\\('([^']+)'/);
+  if(!m||!m[1].includes('confirmar_aceite'))return null;
+  const tr=a.closest('tr');const tds=tr?[...tr.querySelectorAll('td')]:[];
+  const num=tds.find(td=>/^\\d{7,}$/.test(td.innerText.trim()));
+  const img=a.querySelector('img')?.getAttribute('src')||'';
+  return {url:m[1],num:num?num.innerText.trim():'',
+          principal:img.includes('doc_principal')};
+}).filter(Boolean)
+"""
+
+# Resolve a coluna "Ações" chamando o endpoint do módulo de peticionamento em LOTE, em vez
+# de esperar o lazy-load nativo (ver `_aceites_lazy`). Devolve o HTML já renderizado de cada
+# placeholder, junto do nº do documento lido da própria linha.
+_JS_ACEITES_LAZY = """
+async ()=>{
+  const els=[...document.querySelectorAll('.md-pet-acao-lazy')];
+  if(!els.length) return [];
+  const m=document.documentElement.innerHTML.match(/var mdPetUrl\\s*=\\s*"([^"]+)"/);
+  if(!m) return [];
+  const itens=els.map(e=>({id:e.dataset.id,acesso:e.dataset.acesso,
+                           procedimento:e.dataset.procedimento,isproc:e.dataset.isproc}));
+  async function buscar(lista){
+    const r=await fetch(m[1],{method:'POST',body:JSON.stringify({itens:lista})});
+    const d=await r.json();
+    return (d && d.erro) ? {} : (d||{});
+  }
+  let dados=await buscar(itens);
+  // se o endpoint não aceitar o lote inteiro, cai para uma chamada por item
+  const faltando=itens.filter(i=>!(i.id in dados));
+  for(const i of faltando){ Object.assign(dados, await buscar([i])); }
+  return els.map(e=>{
+    const html=dados[e.dataset.id]?atob(dados[e.dataset.id]):'';
+    const tr=e.closest('tr');const tds=tr?[...tr.querySelectorAll('td')]:[];
+    const num=tds.find(td=>/^\\d{7,}$/.test(td.innerText.trim()));
+    return {html:html,num:num?num.innerText.trim():''};
+  }).filter(x=>x.html);
+}
+"""
+
+_MODAL_ACEITE_RE = re.compile(r"infraAbrirJanelaModal\('([^']*confirmar_aceite[^']*)'")
+
+
+def _aceites_lazy(page) -> list[dict]:
+    """Ícones de aceite que o lazy-load da coluna "Ações" ainda não renderizou.
+
+    ⚠️ Por que isto existe (achado de 2026-08-07, ofício coletivo 693 / proc
+    53500.101985/2026-62): a coluna "Ações" não vem no HTML — cada linha traz um
+    `<div class="md-pet-acao-lazy">` e um loader que faz **um POST por documento, em
+    cadeia** (`get_acoes_protocolo_lista`). Num processo com ~105 documentos a cadeia leva
+    dezenas de segundos, e o `abrir_processo` (que espera ~11s) lia a página antes de os
+    ícones de aceite existirem ⇒ `urls_aceite` devolvia `[]` e o bot concluía "ciência já
+    dada", ficando sem por onde entrar. Rolar mais não resolve: o custo é de rede, não de
+    viewport.
+
+    Aqui chamamos o mesmo endpoint **em lote**, uma vez, e lemos o HTML dos botões. É o
+    mesmo GET/POST de leitura que o navegador faria — não confirma nada.
+    """
+    try:
+        itens = page.evaluate(_JS_ACEITES_LAZY) or []
+    except Exception:
+        return []   # sem as ações do lazy seguimos com o que o DOM já mostrava
+    achados = []
+    for it in itens:
+        m = _MODAL_ACEITE_RE.search(it.get("html") or "")
+        if m:
+            achados.append({"url": _html.unescape(m.group(1)), "num": it.get("num", ""),
+                            "principal": "doc_principal" in it["html"]})
+    return achados
+
+
 def urls_aceite(page) -> list[dict]:
     """Ícones de aceite da intimação (só existem enquanto ela está PENDENTE).
 
     -> [{'url', 'num', 'principal'}] — `principal` marca o ícone do Documento Principal
     (o ofício). Lista vazia ⇒ a intimação já foi cumprida (ciência já dada).
+
+    Lê o DOM e, para as linhas cuja coluna "Ações" ainda não carregou, resolve o lazy-load
+    pelo endpoint (`_aceites_lazy`). Sem esse complemento, processo grande = falso "já
+    cumprida".
     """
-    return page.evaluate(
-        "()=>[...document.querySelectorAll('a')].map(a=>{"
-        "const oc=a.getAttribute('onclick')||'';"
-        "const m=oc.match(/infraAbrirJanelaModal\\('([^']+)'/);"
-        "if(!m||!m[1].includes('confirmar_aceite'))return null;"
-        "const tr=a.closest('tr');const tds=tr?[...tr.querySelectorAll('td')]:[];"
-        "const num=tds.find(td=>/^\\d{7,}$/.test(td.innerText.trim()));"
-        "const img=a.querySelector('img')?.getAttribute('src')||'';"
-        "return {url:m[1],num:num?num.innerText.trim():'',"
-        "principal:img.includes('doc_principal')};}).filter(Boolean)"
-    )
+    achados = page.evaluate(_JS_ACEITES_DOM) or []
+    vistos = {a["url"] for a in achados}
+    achados += [a for a in _aceites_lazy(page) if a["url"] not in vistos]
+    return achados
+
+
+def escolher_aceite(aceites: list, doc_id: str = "") -> Optional[dict]:
+    """Qual ícone de aceite confirmar. Confirmar qualquer um cumpre a intimação inteira (a
+    URL carrega todos os `id_intimacao[]`), mas escolhemos o do próprio ofício para que o
+    log diga o que foi confirmado.
+
+    Ordem: o documento cujo nº é o do ofício → o marcado como `principal` → o primeiro.
+    ⚠️ O marcador `doc_principal` nem sempre vem: no coletivo 693 (2026-08-07) os 4 ícones
+    vieram com `principal=False`, e sem o casamento por `doc_id` a escolha seria arbitrária.
+    """
+    if not aceites:
+        return None
+    return (next((a for a in aceites if doc_id and a.get("num") == doc_id), None)
+            or next((a for a in aceites if a.get("principal")), None)
+            or aceites[0])
+
+
+class CienciaIncerta(RuntimeError):
+    """O clique de confirmação foi disparado, mas não deu para confirmar o desfecho.
+
+    ⚠️ Quem trata isto **tem de assumir que a ciência FOI dada** e gravar o checkpoint. Não
+    é hipótese: em 07/08/2026, no coletivo 693, o `click()` estourou esperando a navegação
+    ("click action done ... waiting for scheduled navigations to finish") e a ciência tinha
+    entrado — as 9 empresas viraram "Cumprida por Consulta Direta". Como o erro subiu como
+    falha comum, nada foi gravado nem publicado, e a intimação sairia da seleção em silêncio
+    no ciclo seguinte (ela deixa de ter destinatário Pendente).
+    """
 
 
 def dar_ciencia(page, aceite_url: str) -> None:
     """⚠️ IRREVERSÍVEL — abre a tela de aceite e confirma, INICIANDO O PRAZO.
 
     Confirmar um documento cumpre a intimação inteira (o modal carrega `id_intimacao[]`).
-    Levanta se o botão de confirmação não estiver na tela (não clica em nada por adivinhação).
+    Levanta `RuntimeError` se o botão não estiver na tela (não clica por adivinhação) e
+    `CienciaIncerta` se o clique saiu mas o desfecho ficou em aberto.
     """
     try:
         page.goto(_abs(aceite_url), wait_until="commit")
@@ -222,7 +326,13 @@ def dar_ciencia(page, aceite_url: str) -> None:
     if btn.count() == 0:
         raise RuntimeError(
             f"tela de aceite sem o botão {BTN_ACEITAR} — nada foi confirmado ({page.url})")
-    btn.first.click(timeout=20000)
+    try:
+        # no_wait_after: o clique dispara uma navegação que não assenta (a tela de aceite é
+        # um modal do SEI). Sem isto o click() espera a navegação e estoura DEPOIS de já ter
+        # clicado — ver CienciaIncerta.
+        btn.first.click(timeout=20000, no_wait_after=True)
+    except Exception as e:
+        raise CienciaIncerta(f"clique em {BTN_ACEITAR} sem desfecho confirmado: {e}") from e
     page.wait_for_timeout(3000)
 
 
@@ -239,12 +349,25 @@ def mapa_protocolos(page) -> dict:
             for i in itens}
 
 
-def baixar(context, url: str) -> bytes:
-    """Baixa o conteúdo bruto de um documento (PDF de anexo, ou HTML do ofício)."""
-    r = context.request.get(_abs(url))
-    if r.status >= 400:
-        raise RuntimeError(f"download {url} -> HTTP {r.status}")
-    return r.body()
+def baixar(context, url: str, tentativas: int = 3) -> bytes:
+    """Baixa o conteúdo bruto de um documento (PDF de anexo, ou HTML do ofício).
+
+    Timeout generoso + retry: o `documento_consulta_externa.php` do SEI passa dos 30s
+    padrão do Playwright em documento grande (visto em 07/08/2026 no Ofício 693). Baixar é
+    idempotente, então retentar é seguro — e falhar aqui, depois da ciência, é caro.
+    """
+    ultimo = None
+    for tentativa in range(1, tentativas + 1):
+        try:
+            r = context.request.get(_abs(url), timeout=120000)
+            if r.status >= 400:
+                raise RuntimeError(f"download {url} -> HTTP {r.status}")
+            return r.body()
+        except Exception as e:
+            ultimo = e
+            if tentativa < tentativas:
+                time.sleep(2 ** tentativa)
+    raise RuntimeError(f"download {url} falhou após {tentativas} tentativas: {ultimo}")
 
 
 def oficio_pdf(page, oficio_url: str) -> bytes:

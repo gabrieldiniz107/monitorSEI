@@ -12,6 +12,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Iterator
+from urllib.parse import quote
 
 import httpx
 
@@ -36,6 +37,12 @@ LISTA_FINANCEIRO = "58f1d8eb-ab5f-4106-a065-27ff034c39c4"      # adimplência (S
 
 class GraphError(RuntimeError):
     pass
+
+
+def _url_path(caminho: str) -> str:
+    """Escapa um caminho de drive para a URL (espaços e acentos são a regra nessas pastas).
+    A barra continua sendo separador de pasta."""
+    return quote(caminho.strip("/"), safe="/")
 
 
 @dataclass
@@ -97,6 +104,69 @@ class GraphSharePoint:
         (ex. Title, NumeroOficio, CNPJLookupId). Devolve o item criado (com `id`)."""
         url = f"{GRAPH}/sites/{self.site_id}/lists/{lista_id}/items"
         return self._post(url, {"fields": fields})
+
+    # ------------------------------------------------------------------
+    # Drive (biblioteca de documentos) — usado pela publicação dos ofícios coletivos
+    # ------------------------------------------------------------------
+    def _req_drive(self, metodo: str, url: str, *, ok_404: bool = False, **kw):
+        """Request genérico com o mesmo retry/backoff de `_get`/`_post`.
+
+        `ok_404` devolve None em vez de levantar — é como se pergunta "essa pasta existe?"
+        sem precisar de um endpoint de busca.
+        """
+        ultimo_erro = None
+        for tentativa in range(1, _MAX_TENTATIVAS + 1):
+            try:
+                r = self._http.request(metodo, url, **kw)
+            except httpx.HTTPError as e:
+                ultimo_erro = e
+            else:
+                if r.status_code == 404 and ok_404:
+                    return None
+                if r.status_code < 400:
+                    return r.json() if r.content else {}
+                if r.status_code not in _RETRY_STATUS:
+                    raise GraphError(f"{metodo} {url} -> {r.status_code}: {r.text[:400]}")
+                ultimo_erro = GraphError(f"{metodo} {url} -> {r.status_code}: {r.text[:200]}")
+            if tentativa < _MAX_TENTATIVAS:
+                time.sleep(2 ** (tentativa - 1))
+        raise GraphError(f"{metodo} {url} falhou após {_MAX_TENTATIVAS} tentativas: {ultimo_erro}")
+
+    def item_do_drive(self, drive_id: str, caminho: str) -> dict | None:
+        """Item (arquivo ou pasta) pelo caminho relativo à raiz do drive. None se não existe."""
+        return self._req_drive("GET", f"{GRAPH}/drives/{drive_id}/root:/{_url_path(caminho)}",
+                               ok_404=True, headers=self._hdr())
+
+    def garantir_pasta(self, drive_id: str, caminho_pai: str, nome: str) -> dict:
+        """Devolve a pasta `caminho_pai/nome`, criando se não existir (idempotente)."""
+        alvo = f"{caminho_pai}/{nome}" if caminho_pai else nome
+        item = self.item_do_drive(drive_id, alvo)
+        if item:
+            return item
+        url = (f"{GRAPH}/drives/{drive_id}/root:/{_url_path(caminho_pai)}:/children"
+               if caminho_pai else f"{GRAPH}/drives/{drive_id}/root/children")
+        corpo = {"name": nome, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"}
+        try:
+            return self._req_drive("POST", url, json=corpo,
+                                   headers=self._hdr({"Content-Type": "application/json"}))
+        except GraphError:
+            # corrida (ou 409 de "já existe"): se a pasta está lá agora, o objetivo foi atingido
+            item = self.item_do_drive(drive_id, alvo)
+            if item:
+                return item
+            raise
+
+    def upload_arquivo(self, drive_id: str, caminho: str, conteudo: bytes,
+                       mime: str = "application/octet-stream") -> dict:
+        """Sobe um arquivo (até ~4 MB) em `caminho`, relativo à raiz do drive.
+
+        `conflictBehavior=replace` (e não `rename`) torna o comando **idempetente**: rodar
+        de novo no mesmo ofício regrava os arquivos em vez de criar "Ofício (1).pdf".
+        """
+        url = (f"{GRAPH}/drives/{drive_id}/root:/{_url_path(caminho)}:/content"
+               "?@microsoft.graph.conflictBehavior=replace")
+        return self._req_drive("PUT", url, content=conteudo,
+                               headers=self._hdr({"Content-Type": mime}))
 
     def listas(self) -> list[dict]:
         url = f"{GRAPH}/sites/{self.site_id}/lists"

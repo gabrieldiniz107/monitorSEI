@@ -13,7 +13,8 @@ Jurídico da SCM. Contexto amplo do Jurídico está no CLAUDE.md da raiz do proj
 
 Na **Fase 1** o bot é **estritamente somente-leitura**: só raspa listagens em texto, nunca
 dá ciência. A **Fase 2** dá ciência de propósito, mas só para individual + cliente ATIVO e
-atrás de um comando separado (`tratar --modo real`) — nunca no `run` de produção.
+atrás de um comando separado (`tratar --modo real`) — nunca no `run` de produção. A **Fase 4**
+faz o mesmo para o ofício coletivo (`coletivo --modo real`), com as mesmas travas.
 
 **CORREÇÃO IMPORTANTE (2026-07-20, validado numa intimação Pendente real):** durante muito
 tempo assumimos que *abrir* o processo já dava ciência. **Não dá.** Abrir
@@ -99,7 +100,11 @@ python -m seibot.monitor run        # detecta novos e notifica no Teams
 python -m seibot.monitor prazos     # Fase 3: avisos de prazo (1x/dia, nao acessa o SEI)
 python -m seibot.monitor tratar --modo completo --doc-id 16067648   # alveja UMA intimação
 python validar_login.py             # valida só o login (teste do Turnstile headless)
-pytest -q                           # 181 testes (parser/classificar/store/notify/monitor/clientes/…)
+python -m seibot.monitor coletivo --modo ensaio                      # Fase 4: lista coletivos candidatos
+python -m seibot.monitor coletivo --modo mapear --doc-id 16075320    # READ-ONLY, diagnostica 1 coletivo
+python -m seibot.monitor coletivo --modo completo --doc-id 16075320  # tudo, SEM ciencia (ja cumprido)
+python -m seibot.monitor coletivo --modo real [--doc-id N]           # DA CIENCIA e publica a pasta
+pytest -q                           # 216 testes (parser/classificar/store/notify/monitor/clientes/coletivo/…)
 ```
 
 Parser e classificador são **puros** (testáveis sem browser). A fixture real
@@ -495,6 +500,65 @@ ainda rotacionava o refresh token em `state/.graph_token.json`. Mitigado no `_cf
 `test_monitor.py` (zera todos os canais de saída). A correção de fundo — `conftest.py` na raiz
 neutralizando `load_dotenv` e limpando o `os.environ` **antes** de importar `seibot` — segue
 pendente por decisão do usuário.
+
+### Fase 4 — ofício COLETIVO: ciência + pasta compartilhada (2026-08-07)
+
+Ofício que a Anatel manda para **várias empresas de uma vez**. Comando **`monitor coletivo
+--modo {ensaio|mapear|completo|real}`**. O bot abre → dá ciência (**uma** cobre todos os
+destinatários) → baixa ofício + anexos → **publica na biblioteca compartilhada com os
+clientes** → avisa o Teams com o link. **Sem e-mail, sem card, fora da Fase 3** — publicar
+na pasta É a entrega. Detalhe completo em `FASE-4-COLETIVO.md`.
+
+- `seibot/coletivo.py` (pipeline), `seibot/biblioteca.py` (publicação), escrita em drive no
+  `graph.py` (`item_do_drive` / `garantir_pasta` / `upload_arquivo`).
+- Destino: site **CLIENTESEPARCEIROS** → biblioteca **DOCUMENTOS** → `Ofícios Jurídicos
+  Anatel/Ofício N (docid)`. Mesmo app app-only "SCM VISTORIAS" — nenhuma credencial nova.
+- Seleção: **todo coletivo com ≥1 destinatário Pendente**, sem olhar cliente ativo (o ofício
+  é indivisível e a pasta é do ofício, não da empresa).
+- `--modo real` tem as travas do individual (`TRATAR_AUTO=true` + dia útil, antes do login) e
+  aceita **`--doc-id`** para alvejar um ofício só.
+- ⚠️ **Anexo do coletivo = o que o TEXTO do ofício cita** (`extrair_anexos`), e **não** os
+  documentos que o SEI empacotou na intimação — o oposto da Fase 2. No 693 o SEI empacotou 3
+  anexos, mas a Planilha "Tabela ISPs/Domínios" (16075319) não é do ofício e não pode ir ao
+  cliente; o texto citava os 2 corretos. Contrapartida aceita: ofício que não cita um anexo
+  real deixa o cliente sem ele (caso do Ofício 70) — por isso **o individual não mudou**.
+- ⚠️ **Coletivo TEM prazo, e curto**: os 9 da janela de 07/08 eram todos URGENTE com 5 dias.
+  Vai destacado com ⚠️ no Teams mas **não** entra no acompanhamento da Fase 3 (que depende da
+  raia do card, e coletivo não tem card) — decisão do usuário para não ampliar o escopo.
+- Validado ao vivo em 07/08/2026: ciência real no **Ofício 693** (9 empresas, 1 confirmação,
+  prazo 14/08) e pastas publicadas de 693 e 697.
+
+### ⚠️ A coluna "Ações" é lazy — e isso derrubava a ciência em silêncio (2026-08-07)
+
+Causa-raiz do "bloqueio" da Fase 4 e, muito provavelmente, das falhas silenciosas do
+individual em 03/08 (Ofício 630) e 05/08 (Age Telecomunicações).
+
+A coluna "Ações" da Lista de Protocolos **não vem no HTML**: cada linha traz um
+`<div class="md-pet-acao-lazy">` e um loader que busca os botões por AJAX
+(`get_acoes_protocolo_lista`), **um documento por vez, encadeado**. Num processo com ~105
+documentos (o do Ofício 693) a cadeia leva dezenas de segundos, e o `abrir_processo` espera
+~11s → `urls_aceite()` devolvia `[]`. E `[]` significa **"ciência já dada"** ⇒ o bot seguia
+sem por onde entrar, ou descartava a intimação sem rastro. Rolar mais não resolve: o custo é
+de rede, não de viewport.
+
+**Fix:** `processo._aceites_lazy` chama o endpoint **em lote, uma vez**, decodifica o HTML
+dos botões e junta ao que o DOM já mostrava. No 693: de 0 para 4 ícones de aceite.
+
+Três consertos vieram junto:
+
+- **`processo.CienciaIncerta`** — na primeira ciência real o `click()` estourou em
+  `waiting for scheduled navigations to finish` **depois** de `click action done`: a ciência
+  entrou, mas o erro subiu como falha comum, o checkpoint não foi gravado e nada foi
+  publicado (e no ciclo seguinte o ofício sairia da seleção em silêncio, por não ter mais
+  destinatário Pendente). Agora o clique usa `no_wait_after=True` e, se ainda assim falhar,
+  vira `CienciaIncerta` — que `tratativa`/`coletivo` tratam como **ciência dada**: gravam o
+  checkpoint e alertam como falha pós-ciência.
+- **`processo.escolher_aceite(aceites, doc_id)`** — o marcador `doc_principal` nem sempre vem
+  (no 693 os 4 ícones vieram com `principal=False`), então passa a casar pelo nº do ofício
+  primeiro. Usado pelo individual e pelo coletivo.
+- **`processo.baixar`** ganhou timeout de 120s + 3 tentativas: o
+  `documento_consulta_externa.php` passou dos 30s padrão no Ofício 693, e falhar ali é
+  *depois* da ciência.
 
 ### Fase 3 — acompanhamento de prazos (feature 2026-08-05)
 

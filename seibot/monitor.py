@@ -284,6 +284,117 @@ def _indexar_cards(g) -> dict:
     return cards
 
 
+def _cmd_coletivo(cfg: Config, modo: str = "ensaio", doc_id_alvo: str | None = None) -> dict:
+    """Fase 4 — ofício COLETIVO: ciência + publicação dos documentos na pasta do cliente.
+
+    - `mapear --doc-id N`: READ-ONLY. Abre a página e conta os ícones de aceite. Não clica.
+    - `ensaio` (default): só lista os candidatos. Não abre nada.
+    - `completo --doc-id N`: pipeline inteiro num coletivo JÁ CUMPRIDO, **sem** ciência —
+      baixa, publica na pasta e notifica. É o ensaio-geral.
+    - `real`: dá **CIÊNCIA** de verdade nos coletivos Pendentes e publica. Com `--doc-id N`
+      alveja um ofício só (usado para a primeira ciência à mão); sem a flag trata o lote,
+      que é como o cron roda.
+    """
+    from . import coletivo as col
+    from . import sessao, tratativa
+
+    # travas do modo real, verificadas ANTES do login (não gasta 2FA) — as mesmas do
+    # `tratar`: ciência é irreversível e iniciar prazo fora de dia útil é decisão humana.
+    if modo == "real":
+        if not cfg.tratar_auto:
+            return {"status": "erro", "modo": "real",
+                    "erro": "TRATAR_AUTO=false no .env — o modo real dá CIÊNCIA e está "
+                            "desarmado. Ligue TRATAR_AUTO=true para armar."}
+        if not datas.eh_dia_util(date.today()):
+            return {"status": "ok", "modo": "real", "candidatos": 0, "tratados": 0,
+                    "pulado": "fim de semana — ciência só em dia útil"}
+    if modo in ("mapear", "completo") and not doc_id_alvo:
+        return {"status": "erro", "erro": f"modo {modo} exige --doc-id <id do documento>."}
+
+    clientes = clientes_mod.carregar_clientes()
+    store = IntimacoesStore(cfg.seen_db_path)
+    g_graph = getattr(clientes, "graph", None)
+    if modo in ("completo", "real") and g_graph is None:
+        return {"status": "erro",
+                "erro": "SharePoint indisponível — sem ele não dá para publicar os documentos."}
+
+    with sessao.abrir(cfg, permitir_login=True) as sess:
+        intims = intimacoes.coletar(sess.page, cfg, paginas=cfg.run_paginas)
+        grupos = classificar.agrupar_por_oficio(intims)
+
+        if modo in ("mapear", "completo"):
+            g = next((x for x in grupos if x.doc_id == doc_id_alvo), None)
+            if g is None:
+                return {"status": "erro", "erro": f"ofício doc {doc_id_alvo} não achado na página."}
+            if g.tipo != "coletivo":
+                return {"status": "erro",
+                        "erro": f"ofício {g.doc_id} é individual — use 'tratar' (Fase 2)."}
+            if modo == "mapear":
+                return {"status": "ok", "modo": "mapear", **col.mapear(sess, g)}
+            if any(i.situacao == tratativa.SITUACAO_PENDENTE for i in g.destinatarios):
+                return {"status": "erro",
+                        "erro": "ABORTADO: há destinatário Pendente — o ensaio-completo só "
+                                "roda em ofício já cumprido (para não dar ciência)."}
+            print(f"\n===== COLETIVO (ENSAIO-COMPLETO) em {g.processo} / {g.oficio_desc} "
+                  f"({g.doc_id}) — SEM dar ciência =====")
+            r = col.tratar_coletivo(sess, cfg, g, clientes, store, g_graph,
+                                    dar_ciencia=False,
+                                    url_teams=cfg.teams_webhook_url or None)
+            return {"status": "ok", "modo": "completo", **r}
+
+        candidatos = col.selecionar_candidatos(grupos, store)
+        if doc_id_alvo:
+            # alveja UM ofício. Existe para a primeira ciência coletiva ser feita à mão e
+            # conferida no SEI antes de o cron soltar o modo real sobre o lote inteiro.
+            candidatos = [g for g in candidatos if g.doc_id == doc_id_alvo]
+            if not candidatos:
+                alvo = next((x for x in grupos if x.doc_id == doc_id_alvo), None)
+                motivo = ("não achado na página" if alvo is None
+                          else col.motivo_nao_candidato(
+                              alvo, ja_tratado=all(store.ja_tratado(i.chave)
+                                                   for i in alvo.destinatarios)))
+                return {"status": "erro",
+                        "erro": f"ofício doc {doc_id_alvo} não é candidato: {motivo}"}
+        if modo == "ensaio":
+            print(f"\n===== COLETIVO (ENSAIO): {len(candidatos)} candidato(s) — NADA foi aberto =====")
+            for g in candidatos:
+                pend = sum(1 for i in g.destinatarios if i.situacao == tratativa.SITUACAO_PENDENTE)
+                print(f"  • {g.processo} | {g.oficio_desc} ({g.doc_id}) | "
+                      f"{len(g.destinatarios)} empresas ({pend} Pendente(s)) | {g.tipo_intimacao}")
+            return {"status": "ok", "modo": "ensaio", "coletados": len(intims),
+                    "candidatos": len(candidatos)}
+
+        print(f"\n===== COLETIVO (REAL — DÁ CIÊNCIA): {len(candidatos)} candidato(s) =====")
+        tratados = falhas = criticas = 0
+        for g in candidatos:
+            try:
+                col.tratar_coletivo(sess, cfg, g, clientes, store, g_graph,
+                                    dar_ciencia=True,
+                                    url_teams=cfg.teams_webhook_url or None)
+                tratados += 1
+            except tratativa.TratativaIncompleta as e:
+                criticas += 1
+                falhas += 1
+                print(f"  ERRO CRÍTICO em {g.processo}: {e}")
+                erros.notificar_erro(
+                    cfg, f"coletivo --modo real · {g.processo}", e, critico=True,
+                    detalhe=(f"<b>Ofício:</b> {g.oficio_desc} ({g.doc_id})<br>"
+                             f"<b>Empresas:</b> {len(g.destinatarios)}<br>"
+                             "⚠️ <b>A CIÊNCIA JÁ FOI DADA.</b><br>"
+                             "O bot não vai tentar de novo (checkpoint no store) e os "
+                             "documentos <b>não</b> foram publicados. Tratar à mão."))
+            except Exception as e:  # noqa: BLE001
+                falhas += 1
+                print(f"  erro ao tratar coletivo {g.processo}: {e}")
+                erros.notificar_erro(
+                    cfg, f"coletivo --modo real · {g.processo}", e,
+                    detalhe=(f"<b>Ofício:</b> {g.oficio_desc} ({g.doc_id})<br>"
+                             "Ciência NÃO foi dada; será retentado no próximo ciclo."))
+        return {"status": "ok" if falhas == 0 else "parcial", "modo": "real",
+                "candidatos": len(candidatos), "tratados": tratados,
+                "falhas": falhas, "criticas": criticas}
+
+
 def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = None,
                 doc_id_alvo: str | None = None) -> dict:
     """Fase 2 — tratativa individual, em 3 modos:
@@ -397,9 +508,11 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="seibot.monitor", description="Monitor de Intimações SEI")
     parser.add_argument("comando",
-                        choices=["run", "baseline", "dry-run", "tratar", "prazos"])
-    parser.add_argument("--modo", choices=["ensaio", "completo", "real"], default="ensaio",
-                        help="modo do 'tratar' (default: ensaio)")
+                        choices=["run", "baseline", "dry-run", "tratar", "prazos", "coletivo"])
+    parser.add_argument("--modo", choices=["ensaio", "completo", "real", "mapear"],
+                        default="ensaio",
+                        help="modo do 'tratar'/'coletivo' (default: ensaio). "
+                             "'mapear' só existe no 'coletivo' e é read-only")
     parser.add_argument("--processo", default=None,
                         help="nº do processo (para 'tratar --modo completo')")
     parser.add_argument("--doc-id", dest="doc_id", default=None,
@@ -423,13 +536,15 @@ def main(argv=None) -> int:
             res = _cmd_baseline(cfg)
         elif args.comando == "tratar":
             res = _cmd_tratar(cfg, args.modo, args.processo, args.doc_id)
+        elif args.comando == "coletivo":
+            res = _cmd_coletivo(cfg, args.modo, args.doc_id)
         elif args.comando == "prazos":
             res = _cmd_prazos(cfg)
         else:
             res = _cmd_dry_run(cfg)
     except Exception as e:  # noqa: BLE001 — inclusive erros não mapeados
         ctx = f"monitor {args.comando}"
-        if args.comando == "tratar":
+        if args.comando in ("tratar", "coletivo"):
             ctx += f" --modo {args.modo}"
         erros.notificar_erro(cfg, ctx, e)
         print(json.dumps({"status": "erro", "comando": args.comando,
