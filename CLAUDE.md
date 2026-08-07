@@ -541,8 +541,14 @@ documentos (o do Ofício 693) a cadeia leva dezenas de segundos, e o `abrir_proc
 sem por onde entrar, ou descartava a intimação sem rastro. Rolar mais não resolve: o custo é
 de rede, não de viewport.
 
-**Fix:** `processo._aceites_lazy` chama o endpoint **em lote, uma vez**, decodifica o HTML
-dos botões e junta ao que o DOM já mostrava. No 693: de 0 para 4 ícones de aceite.
+**Fix:** `processo._aceites_lazy` chama o endpoint direto, decodifica o HTML dos botões e
+junta ao que o DOM já mostrava. No 693: de 0 para 4 ícones de aceite.
+
+⚠️ **O endpoint responde HTTP 500 quando o lote é grande** (medido em 07/08/2026 no ofício
+682, com 16 itens). Por isso `buscar()` no JS **nunca levanta**: tenta o lote e, se ele
+falhar, refaz **item a item** — que é como o loader nativo do SEI sempre faz. A primeira
+versão fazia `r.json()` solto, então o 500 virava exceção, o fallback nunca rodava e
+`urls_aceite()` voltava vazio (= "ciência já dada"). Foi o que derrubou 682 e 666 no lote.
 
 Três consertos vieram junto:
 
@@ -559,6 +565,11 @@ Três consertos vieram junto:
 - **`processo.baixar`** ganhou timeout de 120s + 3 tentativas: o
   `documento_consulta_externa.php` passou dos 30s padrão no Ofício 693, e falhar ali é
   *depois* da ciência.
+- **`coletivo._aceites_de_pendente`** — "sem ícone de aceite" só é estado válido quando
+  **não há destinatário Pendente**. Havendo, relê a página até 3x (e retenta erro de
+  navegação, que derrubou o ofício 663) e, se ainda assim nada, **aborta sem tocar em nada**.
+  Antes o bot seguia como "ciência já dada", quebrava adiante em "ofício não achado na Lista
+  de Protocolos" e a intimação ficava Pendente sem ninguém ter dado ciência.
 
 ### Fase 3 — acompanhamento de prazos (feature 2026-08-05)
 
