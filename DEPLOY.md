@@ -43,9 +43,17 @@ CRON_TZ=America/Sao_Paulo
 # Fase 2 — tratativa individual (DÁ CIÊNCIA). 10 min após o run, para não concorrer na sessão.
 # Em sábado/domingo o comando sai sozinho sem logar: ciência só em dia útil.
 10 7,11,14,17 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor tratar --modo real >> /var/log/sei-tratativa.log 2>&1
+# Fase 4 — ofício coletivo (DÁ CIÊNCIA e publica a pasta compartilhada). 20 min após o run,
+# para não concorrer na sessão com o `run` nem com a tratativa individual.
+20 7,11,14,17 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor coletivo --modo real >> /var/log/sei-coletivo.log 2>&1
 # Fase 3 — acompanhamento de prazos (1x/dia). NÃO acessa o SEI: lê o banco + o Kanban.
 30 8 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor prazos >> /var/log/sei-prazos.log 2>&1
 ```
+
+⚠️ O `coletivo --modo real` também exige `TRATAR_AUTO=true` e só roda em dia útil (as duas
+travas são verificadas **antes do login**, então não gasta 2FA à toa). Ele trata **todos** os
+coletivos candidatos do lote; `--doc-id N` alveja um só, e é como se faz a primeira execução
+à mão.
 (Se precisou de xvfb: `... run --rm sei-monitor xvfb-run -a python -m seibot.monitor run ...`)
 
 ## 5. Canal de erros — DM no Teams (login único)
