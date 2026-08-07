@@ -148,7 +148,18 @@ def _aceites_de_pendente(page, grupo: Grupo, log) -> list:
 
     pendentes = [i for i in grupo.destinatarios if i.situacao == SITUACAO_PENDENTE]
     for tentativa in range(1, TENTATIVAS_ACEITE + 1):
-        aceites = processo.urls_aceite(page)
+        try:
+            aceites = processo.urls_aceite(page)
+        except Exception as e:
+            # "Execution context was destroyed": a página navegou enquanto líamos as ações
+            # (o loader nativo do SEI faz um fetch por documento e a página se recarrega).
+            # Reabrir resolve — é a mesma classe de erro que `abrir_processo` já retenta.
+            if not processo._eh_erro_navegacao(e) or tentativa == TENTATIVAS_ACEITE:
+                raise
+            log(f"   ⚠️ a página navegou ao ler as Ações (tentativa {tentativa}/"
+                f"{TENTATIVAS_ACEITE}) — recarregando…")
+            processo.abrir_processo(page, grupo.destinatarios[0].consulta_url)
+            continue
         if aceites or not pendentes:
             return aceites
         log(f"   ⚠️ {len(pendentes)} destinatário(s) Pendente(s) e nenhum ícone de aceite "

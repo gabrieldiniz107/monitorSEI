@@ -217,13 +217,21 @@ async ()=>{
   if(!m) return [];
   const itens=els.map(e=>({id:e.dataset.id,acesso:e.dataset.acesso,
                            procedimento:e.dataset.procedimento,isproc:e.dataset.isproc}));
+  // NUNCA levanta: o endpoint responde HTTP 500 quando o lote é grande (medido em
+  // 07/08/2026 com 16 itens, ofício 682). Se o lote falhar, o `for` abaixo refaz item a
+  // item — que é como o loader nativo do SEI sempre faz. Antes isto era um `r.json()`
+  // solto: o 500 virava exceção, o fallback nunca rodava, e o bot concluía "sem ícone de
+  // aceite" = "ciência já dada".
   async function buscar(lista){
-    const r=await fetch(m[1],{method:'POST',body:JSON.stringify({itens:lista})});
-    const d=await r.json();
-    return (d && d.erro) ? {} : (d||{});
+    try{
+      const r=await fetch(m[1],{method:'POST',body:JSON.stringify({itens:lista})});
+      if(!r.ok) return {};
+      const t=await r.text();
+      let d; try{ d=JSON.parse(t); }catch(e){ return {}; }
+      return (d && d.erro) ? {} : (d||{});
+    }catch(e){ return {}; }
   }
   let dados=await buscar(itens);
-  // se o endpoint não aceitar o lote inteiro, cai para uma chamada por item
   const faltando=itens.filter(i=>!(i.id in dados));
   for(const i of faltando){ Object.assign(dados, await buscar([i])); }
   return els.map(e=>{

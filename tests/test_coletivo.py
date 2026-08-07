@@ -267,3 +267,36 @@ def test_sem_pendente_e_sem_icone_segue_normal(processo_fake):
     page = _PageFake([[]])
     processo_fake(page)
     assert coletivo._aceites_de_pendente(page, g, lambda *_: None) == []
+
+
+def test_navegacao_no_meio_da_leitura_das_acoes_e_retentada(monkeypatch):
+    """Ofício 663 (07/08/2026): `urls_aceite` levantou "Execution context was destroyed" —
+    a página navegou enquanto o loader do SEI buscava as Ações. Reabrir resolve."""
+    import seibot.processo as real
+    g = _grupo(_intim("1"), _intim("2"))
+    chamadas = {"n": 0}
+
+    def instavel(page):
+        chamadas["n"] += 1
+        if chamadas["n"] == 1:
+            raise RuntimeError("Page.evaluate: Execution context was destroyed, "
+                               "most likely because of a navigation")
+        return _ACEITE
+
+    monkeypatch.setattr(real, "urls_aceite", instavel)
+    monkeypatch.setattr(real, "abrir_processo", lambda *a, **k: None)
+    assert coletivo._aceites_de_pendente(None, g, lambda *_: None) == _ACEITE
+
+
+def test_erro_alheio_ao_ler_as_acoes_nao_e_engolido(monkeypatch):
+    """Só erro de navegação é retentável — o resto tem de subir, não virar 'sem aceite'."""
+    import seibot.processo as real
+    g = _grupo(_intim("1"), _intim("2"))
+
+    def quebra(page):
+        raise RuntimeError("browser has been closed")
+
+    monkeypatch.setattr(real, "urls_aceite", quebra)
+    monkeypatch.setattr(real, "abrir_processo", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="browser has been closed"):
+        coletivo._aceites_de_pendente(None, g, lambda *_: None)
