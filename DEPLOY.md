@@ -34,20 +34,26 @@ histórico). Não envia nada ao Teams:
 docker compose run --rm sei-monitor python -m seibot.monitor baseline
 ```
 
-## 4. Agendar no cron do host (07/11/14/17h, America/Sao_Paulo)
+## 4. Agendar no cron do host (07/11/14/17h, America/Sao_Paulo, **seg–sex**)
+
+⚠️ **A automação não roda em fim de semana** (decisão do usuário, 2026-08-10). São duas
+travas de propósito: o `1-5` do cron **e** a verificação no próprio código
+(`monitor._pular_fim_de_semana`, aplicada a `run`/`prazos`; `tratar`/`coletivo --modo real`
+já tinham a sua). Assim, rodar à mão num sábado também não dispara nada — e o `run` nem
+gasta um código 2FA na caixa do Rodrigo num dia em que ninguém vai agir.
+
 `crontab -e`:
 ```cron
 CRON_TZ=America/Sao_Paulo
 # Fase 1 — monitorar e notificar (somente leitura)
-0 7,11,14,17 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor run >> /var/log/sei-monitor.log 2>&1
+0 7,11,14,17 * * 1-5 cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor run >> /var/log/sei-monitor.log 2>&1
 # Fase 2 — tratativa individual (DÁ CIÊNCIA). 10 min após o run, para não concorrer na sessão.
-# Em sábado/domingo o comando sai sozinho sem logar: ciência só em dia útil.
-10 7,11,14,17 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor tratar --modo real >> /var/log/sei-tratativa.log 2>&1
+10 7,11,14,17 * * 1-5 cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor tratar --modo real >> /var/log/sei-tratativa.log 2>&1
 # Fase 4 — ofício coletivo (DÁ CIÊNCIA e publica a pasta compartilhada). 20 min após o run,
 # para não concorrer na sessão com o `run` nem com a tratativa individual.
-20 7,11,14,17 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor coletivo --modo real >> /var/log/sei-coletivo.log 2>&1
+20 7,11,14,17 * * 1-5 cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor coletivo --modo real >> /var/log/sei-coletivo.log 2>&1
 # Fase 3 — acompanhamento de prazos (1x/dia). NÃO acessa o SEI: lê o banco + o Kanban.
-30 8 * * * cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor prazos >> /var/log/sei-prazos.log 2>&1
+30 8 * * 1-5 cd /opt/monitorSEI && docker compose run --rm sei-monitor python -m seibot.monitor prazos >> /var/log/sei-prazos.log 2>&1
 ```
 
 ⚠️ O `coletivo --modo real` também exige `TRATAR_AUTO=true` e só roda em dia útil (as duas

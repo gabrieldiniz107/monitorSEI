@@ -669,6 +669,19 @@ de card não existia, e com processo multi-intimação — ver o bug do card aba
 - `monitor.acompanhar_prazos(store=, cards=, hoje=, enviar=)` — núcleo com injeção de
   dependência, igual ao `executar`; `_cmd_prazos` é só a casca que monta store/cards/webhook.
 
+### A automação inteira só roda em dia útil (2026-08-10)
+
+Generalização da trava abaixo, a pedido do usuário: **fim de semana é off para tudo que o
+cron dispara**, não só para os comandos que dão ciência.
+
+- `monitor._pular_fim_de_semana` barra **`run`** e **`prazos`** em sábado/domingo, **antes**
+  de qualquer trabalho (no `run` isso evita gastar um código 2FA num dia em que ninguém vai
+  agir). `tratar`/`coletivo --modo real` já tinham a sua trava.
+- Comandos de operação — `dry-run`, `baseline`, `--modo ensaio/mapear/completo` — **seguem
+  rodando qualquer dia**: são ferramentas de quem está ao teclado.
+- O cron da VPS também virou `* * 1-5` nas 4 linhas. Cinto e suspensório de propósito.
+- ⚠️ Feriado continua não sendo considerado (ver a nota do `datas.py`).
+
 ### Ciência só em dia útil (2026-08-05)
 
 `tratar --modo real` **sai sozinho em sábado e domingo**, antes do login (não gasta 2FA),

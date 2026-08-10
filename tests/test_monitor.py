@@ -244,3 +244,34 @@ def test_reconciliar_nao_avisa_quando_ainda_eh_candidata(tmp_path, monkeypatch):
                                        set(), log=lambda *a: None)
     assert n == 0 and enviadas == []
     assert len(store.promessas_abertas()) == 1
+
+
+# --------------------------------------------------------- fim de semana: automação off
+# Decisão do usuário (2026-08-10): "a automação, no geral, roda só durante a semana".
+# `tratar`/`coletivo --modo real` já paravam por causa da ciência; agora vale para todos os
+# comandos que o cron dispara.
+def test_run_e_prazos_param_no_fim_de_semana():
+    from datetime import date
+
+    sabado, domingo = date(2026, 8, 15), date(2026, 8, 16)
+    for comando in ("run", "prazos"):
+        for dia in (sabado, domingo):
+            r = monitor._pular_fim_de_semana(comando, dia)
+            assert r is not None and "fim de semana" in r["pulado"]
+
+
+def test_em_dia_util_a_automacao_segue():
+    from datetime import date
+
+    for comando in ("run", "prazos"):
+        assert monitor._pular_fim_de_semana(comando, date(2026, 8, 14)) is None   # sexta
+
+
+def test_comandos_de_operacao_rodam_em_qualquer_dia():
+    """dry-run/baseline são ferramentas de quem está ao teclado — não podem ser bloqueados
+    no sábado só porque o cron não roda nesse dia."""
+    from datetime import date
+
+    sabado = date(2026, 8, 15)
+    for comando in ("dry-run", "baseline", "tratar", "coletivo"):
+        assert monitor._pular_fim_de_semana(comando, sabado) is None

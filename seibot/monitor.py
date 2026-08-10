@@ -15,7 +15,7 @@ import json
 import sys
 import traceback
 from datetime import date, datetime
-from typing import Callable
+from typing import Callable, Optional
 
 from . import (classificar, clientes as clientes_mod, datas, erros, intimacoes,
                notify, oficio_card)
@@ -574,6 +574,28 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
     return {"status": "erro", "erro": f"modo inválido: {modo}"}
 
 
+# comandos automáticos (rodam no cron). Todos param no fim de semana — decisão do usuário
+# em 2026-08-10: "a automação, no geral, roda só durante a semana". `tratar`/`coletivo` já
+# tinham a trava por causa da ciência; agora vale também para o `run` (notificação) e o
+# `prazos` (lembretes). Comandos de operação — `dry-run`, `baseline`, `--modo ensaio/mapear/
+# completo` — seguem rodando qualquer dia: são ferramentas de quem está ao teclado.
+_COMANDOS_AUTOMATICOS = ("run", "prazos")
+
+
+def _pular_fim_de_semana(comando: str, hoje: date | None = None) -> Optional[dict]:
+    """Resposta de "não é dia útil", ou None se pode seguir.
+
+    Verificado ANTES de qualquer trabalho: no `run` isso evita gastar um código 2FA (que
+    chega no e-mail de uma pessoa real) num dia em que ninguém vai agir sobre o resultado.
+    """
+    if comando not in _COMANDOS_AUTOMATICOS:
+        return None
+    if datas.eh_dia_util(hoje or date.today()):
+        return None
+    return {"status": "ok", "comando": comando,
+            "pulado": "fim de semana — a automação só roda em dia útil"}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="seibot.monitor", description="Monitor de Intimações SEI")
     parser.add_argument("comando",
@@ -597,6 +619,11 @@ def main(argv=None) -> int:
     except Exception as e:  # noqa: BLE001
         print(json.dumps({"status": "erro", "erro": f"config: {e}"}, ensure_ascii=False))
         return 1
+
+    pulado = _pular_fim_de_semana(args.comando)
+    if pulado is not None:
+        print(json.dumps(pulado, ensure_ascii=False), flush=True)
+        return 0
 
     # Rede de segurança: QUALQUER exceção não tratada, em qualquer passo, vira alerta no
     # Teams do responsável técnico. Sem isso uma falha no cron morre silenciosa no log.
