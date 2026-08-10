@@ -10,10 +10,13 @@ Diferenças deliberadas em relação à Fase 2 (`tratativa.py`), que é mono-emp
 - **Não olha se a empresa é cliente ativo.** O ofício é indivisível e a pasta é do ofício,
   não da empresa. Basta haver um destinatário `Pendente`.
 - **Não manda e-mail nem cria rascunho** — publicar na pasta é a entrega.
-- **Não cria card no Kanban** e, por consequência, **não entra no acompanhamento de prazos
-  da Fase 3** (que usa a raia do card como gatilho). Coletivo **tem** prazo com frequência —
-  os 9 da janela de 07/08/2026 eram todos URGENTE, 5 dias — e ele vai destacado com ⚠️ na
-  mensagem do Teams, que é onde o Jurídico o controla à mão.
+- **Card no Kanban sem CNPJ** (são N empresas; o lookup só aponta para uma). As empresas e o
+  link da pasta ficam no comentário de proveniência do card. O card só é criado quando há
+  prazo — é ele que aciona o acompanhamento da Fase 3, e coletivo sem prazo nada tem a
+  acompanhar. **Revisto em 2026-08-10**: antes o coletivo não tinha card e ficava fora do
+  acompanhamento; a premissa "coletivo raramente tem prazo" caiu (os 9 da janela de
+  07/08/2026 eram todos URGENTE, 5 dias), então agora ele é acompanhado como o individual —
+  com **um** lembrete por ofício, não um por empresa.
 - **Anexo = o que o TEXTO do ofício cita**, e não o que o SEI empacotou na intimação
   (o inverso da Fase 2). Ver o comentário em `_apos_ciencia`.
 
@@ -27,9 +30,6 @@ from typing import Optional
 
 from .models import Grupo
 from .tratativa import SITUACAO_PENDENTE, TratativaIncompleta
-
-# por que o coletivo sai do acompanhamento de prazos assim que é registrado
-MOTIVO_SEM_CARD = "coletivo — sem card no Kanban, prazo acompanhado pelo Jurídico"
 
 # quantas empresas listar por extenso na mensagem antes de resumir "(+X)" — igual ao notify
 MAX_EMPRESAS_LISTADAS = 15
@@ -277,27 +277,69 @@ def _apos_ciencia(sess, cfg, grupo: Grupo, clientes, store, g_graph, *,
                                                  link, resumo_txt, ciencias))
         log("   ✓ Teams notificado")
 
-    # registra o prazo (se houver) e PARA o acompanhamento: a Fase 3 se apoia na raia do
-    # card do Kanban, e coletivo não tem card — sem isto ela avisaria "prazo sem card"
-    # para cada uma das N empresas, todo dia.
+    # Card no Kanban — só faz sentido havendo prazo: é ele que aciona o acompanhamento da
+    # Fase 3, e coletivo sem prazo não tem o que acompanhar (2026-08-10).
+    card_id = _criar_card_best_effort(cfg, clientes, grupo, prazo, link, log) if prazo else None
+
+    # registra o prazo (se houver). ⚠️ NÃO para mais o acompanhamento: desde 2026-08-10 o
+    # coletivo tem card, então a Fase 3 tem a raia para consultar. As N linhas (uma por
+    # empresa) ficam marcadas como 'coletivo' para o aviso ser um só, por ofício.
     for i in grupo.destinatarios:
         store.marcar_tratado(i, prazo.data_limite if prazo else "",
                              prazo_dias=prazo.dias if prazo else None,
                              prazo_unidade=prazo.unidade if prazo else "",
-                             oficio_desc=grupo.oficio_desc)
-        if prazo:
-            store.parar_acompanhamento(i.chave, MOTIVO_SEM_CARD)
+                             oficio_desc=grupo.oficio_desc,
+                             grupo_tipo="coletivo", pasta_url=link)
 
     return {"processo": grupo.processo, "doc_id": grupo.doc_id,
             "empresas": len(grupo.destinatarios), "ciencias": ciencias,
             "prazo": prazo.data_limite if prazo else "", "anexos": len(anexos),
-            "pasta": link}
+            "pasta": link, "card": card_id}
+
+
+def _criar_card_best_effort(cfg, clientes, grupo: Grupo, prazo, link: str, log) -> Optional[str]:
+    """Cria o card do coletivo no Kanban. **Best-effort**, igual ao do individual
+    (`tratativa._criar_card_best_effort`): ciência e publicação já aconteceram, então uma
+    falha aqui não pode derrubar o pipeline — só loga e avisa o responsável técnico.
+
+    ⚠️ Sem card não há raia, e sem raia a Fase 3 encerra o acompanhamento no primeiro ciclo
+    (mandando "prazo sem card" ao Jurídico). Por isso o alerta menciona o prazo."""
+    from datetime import date
+
+    g = getattr(clientes, "graph", None)
+    if g is None:
+        return None
+    try:
+        from . import comentarios, oficio_card
+        cid = oficio_card.criar_card_coletivo(g, grupo, prazo, data_cumprimento=date.today(),
+                                              log=log)
+        if cid:
+            try:
+                comentarios.postar_comentario(
+                    cfg, oficio_card.LISTA_CONTROLE_OFICIO, cid,
+                    comentarios.texto_card_coletivo(grupo, link))
+                log("   ✓ comentário de automação postado no card")
+            except Exception as e:  # noqa: BLE001 — comentário é só proveniência
+                log(f"   ⚠️ card criado, mas falhou o comentário de automação: {e}")
+        return cid
+    except Exception as e:  # noqa: BLE001 — card é registro de gestão, não derruba o pipeline
+        log(f"   ⚠️ falha ao criar card do coletivo: {e}")
+        from .erros import notificar_erro
+        notificar_erro(cfg, f"card coletivo · {grupo.processo}", e,
+                       detalhe=(f"<b>Ofício:</b> {grupo.oficio_desc} ({grupo.doc_id})<br>"
+                                f"<b>Empresas:</b> {len(grupo.destinatarios)}<br>"
+                                f"<b>Prazo:</b> {prazo.data_limite if prazo else '—'}<br>"
+                                "Ciência e publicação OK; só o card falhou. Sem card o "
+                                "acompanhamento de prazo NÃO roda — criar à mão."))
+        return None
 
 
 def msg_html(grupo: Grupo, clientes, prazo, n_anexos: int, link: str,
              resumo_txt: str = "", ciencias: int = 0) -> str:
     """Mensagem do Teams. O link da pasta é o item acionável: é de lá que o cliente lê."""
     import html as _html
+
+    from . import oficio_card
 
     def esc(s) -> str:
         return _html.escape(str(s), quote=False)
@@ -316,8 +358,8 @@ def msg_html(grupo: Grupo, clientes, prazo, n_anexos: int, link: str,
     if prazo is not None:
         linhas.append(f"⚠️ <b>ATENÇÃO — este coletivo TEM prazo:</b> {esc(prazo.data_limite)} "
                       f"({esc(prazo.tipo)}, {prazo.dias} {esc(prazo.unidade)})")
-        linhas.append("👉 Coletivo não entra no acompanhamento automático de prazo — "
-                      "controlar à mão.")
+        linhas.append("👉 Prazo acompanhado automaticamente enquanto o card estiver em "
+                      f"<b>{esc(oficio_card.STATUS_AGUARDANDO)}</b> no Controle de Ofício.")
     linhas.append(f"<b>Documentos:</b> ofício + {n_anexos} anexo(s)")
 
     mostradas = grupo.destinatarios[:MAX_EMPRESAS_LISTADAS]

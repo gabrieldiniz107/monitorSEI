@@ -52,7 +52,8 @@ CRON_TZ=America/Sao_Paulo
 
 ⚠️ O `coletivo --modo real` também exige `TRATAR_AUTO=true` e só roda em dia útil (as duas
 travas são verificadas **antes do login**, então não gasta 2FA à toa). Ele trata **todos** os
-coletivos candidatos do lote; `--doc-id N` alveja um só, e é como se faz a primeira execução
+coletivos candidatos do lote; `--doc-id N` alveja ofícios específicos (**vários separados por
+vírgula, na mesma sessão** — um login, um código 2FA), e é como se faz a primeira execução
 à mão.
 (Se precisou de xvfb: `... run --rm sei-monitor xvfb-run -a python -m seibot.monitor run ...`)
 

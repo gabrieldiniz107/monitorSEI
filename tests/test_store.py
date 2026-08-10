@@ -92,6 +92,33 @@ def test_migra_banco_antigo_sem_as_colunas_de_prazo(tmp_path):
     assert store.prazo_de("P1|10|111") == ("19/08/2026", 20, "dias")
 
 
+def test_tratada_nasce_individual_e_o_coletivo_se_identifica(tmp_path):
+    """`grupo_tipo` é o que permite ao acompanhamento colapsar as N linhas de um coletivo
+    num aviso só. Linha antiga/individual não pode virar coletivo por omissão."""
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    i = _intim()
+    store.marcar_tratado(i, "19/08/2026", prazo_dias=20)
+    assert store.em_acompanhamento()[0]["grupo_tipo"] == "individual"
+
+    store.marcar_tratado(i, "19/08/2026", prazo_dias=20, grupo_tipo="coletivo",
+                         pasta_url="https://sharepoint/x")
+    linha = store.em_acompanhamento()[0]
+    assert linha["grupo_tipo"] == "coletivo"
+    assert linha["pasta_url"] == "https://sharepoint/x"
+
+
+def test_checkpoint_do_coletivo_nao_reverte_o_tipo_nem_apaga_a_pasta(tmp_path):
+    """O checkpoint pós-ciência chama sem tipo/pasta; retomada de pipeline não pode
+    rebaixar a linha para 'individual' (perderia o agrupamento do aviso)."""
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    i = _intim()
+    store.marcar_tratado(i, "19/08/2026", prazo_dias=5, grupo_tipo="coletivo",
+                         pasta_url="https://sharepoint/x")
+    store.marcar_tratado(i, "19/08/2026", prazo_dias=5)   # checkpoint/regravação sem os dois
+    linha = store.em_acompanhamento()[0]
+    assert linha["grupo_tipo"] == "coletivo" and linha["pasta_url"] == "https://sharepoint/x"
+
+
 # ---------------------------------------------------------------------------
 # promessas: reconciliação run → tratar
 # ---------------------------------------------------------------------------

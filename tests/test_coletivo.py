@@ -183,10 +183,13 @@ def test_mensagem_sem_ciencia_nao_afirma_que_deu_ciencia():
     assert "ciência dada" not in _msg(link="https://x")
 
 
-def test_prazo_em_coletivo_e_destacado_como_excecao():
+def test_prazo_em_coletivo_e_destacado_e_diz_que_e_acompanhado():
+    """Desde 2026-08-10 o coletivo tem card e entra no acompanhamento da Fase 3 — a
+    mensagem não pode mais mandar o Jurídico controlar o prazo à mão."""
     msg = _msg(prazo=_Prazo())
     assert "TEM prazo" in msg and "19/08/2026" in msg
-    assert "controlar à mão" in msg
+    assert "controlar à mão" not in msg
+    assert "Aguardando documentação (cliente)" in msg
 
 
 def test_sem_prazo_nao_inventa_linha_de_prazo():
@@ -313,3 +316,79 @@ def test_sem_pendente_nem_le_os_icones(processo_fake):
         assert leituras["n"] == 0
     finally:
         monkey.undo()
+
+
+# ------------------------------------------ pós-ciência: card + acompanhamento de prazo
+class _GraphCards:
+    def __init__(self):
+        self.criados = []
+
+    def buscar_item(self, lista, title):
+        return None
+
+    def criar_item(self, lista, fields):
+        self.criados.append(fields)
+        return {"id": "7"}
+
+
+class _ClientesFake:
+    def __init__(self, graph):
+        self.graph = graph
+
+    def info(self, cnpj):
+        return None
+
+
+def _instalar_pos_ciencia(monkeypatch, prazo):
+    """Neutraliza tudo que fala com o SEI/SharePoint no trecho pós-ciência."""
+    import seibot.biblioteca as bib
+    import seibot.processo as real
+    import seibot.resumo as res
+
+    monkeypatch.setattr(real, "mapa_protocolos",
+                        lambda page: {"15960502": {"url": "u", "tipo": "Ofício 600"}})
+    monkeypatch.setattr(real, "url_peticionar_resposta", lambda page: "resp" if prazo else None)
+    monkeypatch.setattr(real, "capturar_prazo", lambda page, url: prazo)
+    monkeypatch.setattr(real, "baixar", lambda ctx, url: b"%PDF-fake")
+    monkeypatch.setattr(real, "extrair_texto_oficio", lambda b: "texto do ofício")
+    monkeypatch.setattr(real, "extrair_anexos", lambda t: [])
+    monkeypatch.setattr(real, "anexos_da_intimacao", lambda *a, **k: [])
+    monkeypatch.setattr(real, "eh_pdf", lambda b: True)
+    monkeypatch.setattr(bib, "publicar", lambda *a, **k: "https://sharepoint/of?a=1&b=2")
+    monkeypatch.setattr(res, "resumir", lambda *a, **k: "resumo")
+
+
+def test_pos_ciencia_cria_card_e_deixa_o_prazo_em_acompanhamento(tmp_path, monkeypatch):
+    """Desde 2026-08-10 o coletivo é acompanhado como o individual: card na raia-gatilho e
+    as N linhas ficam ATIVAS, marcadas como 'coletivo' (para o aviso ser um só)."""
+    from seibot.processo import Prazo
+
+    _instalar_pos_ciencia(monkeypatch, Prazo(tipo="Resposta", dias=5, data_limite="14/08/2026"))
+    g = _grupo(*[_intim(str(n)) for n in range(3)])
+    store = IntimacoesStore(str(tmp_path / "c.db"))
+    graph = _GraphCards()
+
+    r = coletivo._apos_ciencia(_SessFake(None), None, g, _ClientesFake(graph), store, graph,
+                               publicar=True, url_teams=None, ciencias=1, log=lambda *_: None)
+
+    assert r["card"] == "7"
+    assert graph.criados[0]["StatusOficio"] == "Aguardando documentação (cliente)"
+    assert "CNPJLookupId" not in graph.criados[0]
+    linhas = store.em_acompanhamento()
+    assert len(linhas) == 3                       # as 3 empresas seguem ativas
+    assert {l["grupo_tipo"] for l in linhas} == {"coletivo"}
+    assert {l["pasta_url"] for l in linhas} == {"https://sharepoint/of?a=1&b=2"}
+
+
+def test_pos_ciencia_sem_prazo_nao_cria_card(tmp_path, monkeypatch):
+    """Sem prazo não há o que acompanhar — um card ali só faria ruído no board."""
+    _instalar_pos_ciencia(monkeypatch, None)
+    g = _grupo(*[_intim(str(n)) for n in range(2)])
+    store = IntimacoesStore(str(tmp_path / "c2.db"))
+    graph = _GraphCards()
+
+    r = coletivo._apos_ciencia(_SessFake(None), None, g, _ClientesFake(graph), store, graph,
+                               publicar=True, url_teams=None, ciencias=1, log=lambda *_: None)
+
+    assert r["card"] is None and graph.criados == []
+    assert store.em_acompanhamento() == []        # sem data_limite não entra na fila

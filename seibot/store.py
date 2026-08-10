@@ -78,6 +78,11 @@ class IntimacoesStore:
                 "acomp_estado": "TEXT DEFAULT 'ativo'",   # 'ativo' | 'parado'
                 "acomp_motivo": "TEXT DEFAULT ''",
                 "acomp_ultimo_aviso": "TEXT DEFAULT ''",  # 'AAAA-MM-DD' (dedup do dia)
+                # Fase 4: coletivo entrou no acompanhamento (2026-08-10). O tipo é o que
+                # permite colapsar as N linhas de um coletivo num aviso só, e a pasta é o
+                # item acionável do lembrete (é de lá que o cliente lê o ofício).
+                "grupo_tipo": "TEXT DEFAULT 'individual'",  # 'individual' | 'coletivo'
+                "pasta_url": "TEXT DEFAULT ''",
             })
             con.commit()
 
@@ -139,7 +144,8 @@ class IntimacoesStore:
 
     def marcar_tratado(self, intim: Intimacao, data_limite: str = "",
                        prazo_dias: Optional[int] = None, prazo_unidade: str = "",
-                       oficio_desc: str = "") -> None:
+                       oficio_desc: str = "", grupo_tipo: str = "",
+                       pasta_url: str = "") -> None:
         """Marca a intimação como tratada e grava o prazo.
 
         ⚠️ Chamado DUAS vezes no `--modo real`: uma como checkpoint logo após a ciência
@@ -151,23 +157,30 @@ class IntimacoesStore:
         O UPDATE é condicional a `excluded.data_limite != ''` de propósito: se o pipeline
         for retomado e o checkpoint (sem prazo) rodar depois, ele **não** pode apagar um
         prazo já gravado.
+
+        ⚠️ Consequência dessa mesma condição: numa tratativa **sem prazo** a segunda
+        chamada é no-op, então `oficio_desc`/`grupo_tipo`/`pasta_url` não chegam ao banco.
+        Não afeta o acompanhamento (que só existe com prazo), mas é bom saber ao debugar.
         """
         with closing(sqlite3.connect(self._path)) as con:
             con.execute(
                 "INSERT INTO tratadas "
                 "(chave, processo, doc_id, cnpj, data_limite, prazo_dias, prazo_unidade,"
-                " oficio_desc, empresa) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                " oficio_desc, empresa, grupo_tipo, pasta_url) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?,''),'individual'), ?) "
                 "ON CONFLICT(chave) DO UPDATE SET "
                 " data_limite = excluded.data_limite,"
                 " prazo_dias = excluded.prazo_dias,"
                 " prazo_unidade = excluded.prazo_unidade,"
                 " oficio_desc = COALESCE(NULLIF(excluded.oficio_desc,''), tratadas.oficio_desc),"
-                " empresa = COALESCE(NULLIF(excluded.empresa,''), tratadas.empresa) "
+                " empresa = COALESCE(NULLIF(excluded.empresa,''), tratadas.empresa),"
+                " grupo_tipo = COALESCE(NULLIF(excluded.grupo_tipo,'individual'),"
+                "                       NULLIF(tratadas.grupo_tipo,''), 'individual'),"
+                " pasta_url = COALESCE(NULLIF(excluded.pasta_url,''), tratadas.pasta_url) "
                 "WHERE excluded.data_limite != ''",
                 (intim.chave, intim.processo, intim.doc_id, intim.documento,
                  data_limite, prazo_dias, prazo_unidade,
-                 oficio_desc, intim.destinatario),
+                 oficio_desc, intim.destinatario, grupo_tipo, pasta_url),
             )
             con.commit()
 

@@ -76,6 +76,26 @@ def postar_comentario(cfg, lista_id: str, item_id, texto: str,
     return r.json() if r.text else {}
 
 
+def texto_card_coletivo(grupo, link: str = "", hoje: Optional[date] = None) -> str:
+    """Comentário do card de ofício COLETIVO.
+
+    O card não tem CNPJ (são N empresas, e o lookup só aponta para uma), então é aqui que
+    ficam registradas as empresas atingidas e a pasta compartilhada com elas.
+    """
+    d = (hoje or date.today()).strftime("%d/%m/%Y")
+    empresas = "\n".join(f"• {i.destinatario} — {i.documento_fmt}" for i in grupo.destinatarios)
+    txt = (f"[Automação Jurídico] 🤖 Card criado automaticamente pelo monitor do SEI em {d}, "
+           f"a partir da intimação eletrônica ({grupo.oficio_desc}, processo {grupo.processo}). "
+           f"Ofício COLETIVO — {len(grupo.destinatarios)} empresa(s) intimadas no mesmo ofício, "
+           "por isso o card não tem CNPJ. Empresas:\n" + empresas)
+    if link:
+        txt += f"\n\nPasta compartilhada com os clientes: {link}"
+    txt += ("\n\nOs campos de andamento (Status, Tipo de Ofício, etc.) devem ser preenchidos "
+            "pela equipe. Enquanto o card estiver em 'Aguardando documentação (cliente)' o "
+            "prazo é acompanhado automaticamente.")
+    return txt
+
+
 def texto_card(grupo, hoje: Optional[date] = None) -> str:
     """Comentário que marca o card como gerado pela automação (padrão do CREA/CFT)."""
     d = (hoje or date.today()).strftime("%d/%m/%Y")

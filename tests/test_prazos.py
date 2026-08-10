@@ -273,3 +273,84 @@ def test_sem_prazo_nao_entra_no_acompanhamento(tmp_path):
     """Intimação de 'mero Conhecimento' não tem prazo de resposta."""
     store = _store_com_prazo(tmp_path, data_limite="", prazo_dias=None)
     assert store.em_acompanhamento() == []
+
+
+# ---------------------------------------------------------------------------
+# Ofício COLETIVO (Fase 4): N empresas, UM aviso (decisão do usuário, 2026-08-10)
+# ---------------------------------------------------------------------------
+PROC_COL, DOC_COL = "53500.069114/2026-47", "16075320"
+
+
+def _store_coletivo(tmp_path, empresas=3, data_limite="20/08/2026", prazo_dias=5):
+    """Um coletivo vira N linhas em `tratadas` — uma por empresa, mesmo (processo, doc_id)."""
+    store = IntimacoesStore(str(tmp_path / "col.db"))
+    for n in range(empresas):
+        cnpj = f"{n:014d}"
+        intim = Intimacao(
+            processo=PROC_COL, doc_id=DOC_COL, oficio_desc="Ofício 693",
+            destinatario=f"Empresa {n}", documento=cnpj, documento_fmt=cnpj,
+            tipo_destinatario="Pessoa Jurídica",
+            tipo_intimacao="Comunica Decisão Judicial de Cumprimento - URGENTE",
+            data_expedicao="07/08/2026", situacao="Pendente")
+        store.marcar_tratado(intim, data_limite, prazo_dias=prazo_dias, prazo_unidade="dias",
+                             oficio_desc="Ofício 693", grupo_tipo="coletivo",
+                             pasta_url="https://sharepoint/of?a=1&b=2")
+    return store
+
+
+def _cards_col(status):
+    return {(PROC_COL, DOC_COL): {"Title": PROC_COL, "StatusOficio": status}}
+
+
+def test_coletivo_manda_um_aviso_so_para_o_oficio_inteiro(tmp_path):
+    store = _store_coletivo(tmp_path)
+    enviadas = []
+    r = monitor.acompanhar_prazos(store=store, cards=_cards_col(STATUS_AGUARDANDO),
+                                  hoje=date(2026, 8, 19),  # prazo 5 dias → avisa todo dia
+                                  enviar=enviadas.append, log=lambda *a: None)
+    assert r["acompanhando"] == 1 and r["avisos"] == 1
+    assert len(enviadas) == 1
+    assert "Empresas:</b> 3 (ofício coletivo)" in enviadas[0]
+    assert "Empresa:" not in enviadas[0]
+    # o link da pasta é o item acionável e não pode ser escapado
+    assert '<a href="https://sharepoint/of?a=1&b=2">' in enviadas[0]
+
+
+def test_coletivo_marca_o_aviso_em_todas_as_empresas(tmp_path):
+    """Se só a linha representativa fosse marcada, as outras N-1 voltariam amanhã."""
+    store = _store_coletivo(tmp_path)
+    enviadas = []
+    args = dict(store=store, cards=_cards_col(STATUS_AGUARDANDO), hoje=date(2026, 8, 19),
+                log=lambda *a: None)
+    monitor.acompanhar_prazos(enviar=enviadas.append, **args)
+    monitor.acompanhar_prazos(enviar=enviadas.append, **args)
+    assert len(enviadas) == 1
+    assert all(l["acomp_ultimo_aviso"] == "2026-08-19" for l in store.em_acompanhamento())
+
+
+def test_coletivo_para_todas_as_empresas_ao_sair_da_raia(tmp_path):
+    store = _store_coletivo(tmp_path)
+    enviadas = []
+    r = monitor.acompanhar_prazos(store=store, cards=_cards_col("Processo concluído"),
+                                  hoje=date(2026, 8, 19), enviar=enviadas.append,
+                                  log=lambda *a: None)
+    assert r["paradas"] == 1 and len(enviadas) == 1
+    assert store.em_acompanhamento() == []
+
+
+def test_coletivos_diferentes_nao_se_misturam(tmp_path):
+    store = _store_coletivo(tmp_path, empresas=2)
+    outro = Intimacao(
+        processo="53500.000001/2026-11", doc_id="16075999", oficio_desc="Ofício 697",
+        destinatario="Outra", documento="99", documento_fmt="99",
+        tipo_destinatario="Pessoa Jurídica", tipo_intimacao="Comunica Decisão - URGENTE",
+        data_expedicao="07/08/2026", situacao="Pendente")
+    store.marcar_tratado(outro, "20/08/2026", prazo_dias=5, prazo_unidade="dias",
+                         oficio_desc="Ofício 697", grupo_tipo="coletivo")
+    cards = dict(_cards_col(STATUS_AGUARDANDO))
+    cards[(outro.processo, outro.doc_id)] = {"Title": outro.processo,
+                                             "StatusOficio": STATUS_AGUARDANDO}
+    enviadas = []
+    r = monitor.acompanhar_prazos(store=store, cards=cards, hoje=date(2026, 8, 19),
+                                  enviar=enviadas.append, log=lambda *a: None)
+    assert r["acompanhando"] == 2 and len(enviadas) == 2

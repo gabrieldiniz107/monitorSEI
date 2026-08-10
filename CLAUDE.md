@@ -103,8 +103,9 @@ python validar_login.py             # valida só o login (teste do Turnstile hea
 python -m seibot.monitor coletivo --modo ensaio                      # Fase 4: lista coletivos candidatos
 python -m seibot.monitor coletivo --modo mapear --doc-id 16075320    # READ-ONLY, diagnostica 1 coletivo
 python -m seibot.monitor coletivo --modo completo --doc-id 16075320  # tudo, SEM ciencia (ja cumprido)
-python -m seibot.monitor coletivo --modo real [--doc-id N]           # DA CIENCIA e publica a pasta
-pytest -q                           # 216 testes (parser/classificar/store/notify/monitor/clientes/coletivo/…)
+python -m seibot.monitor coletivo --modo completo --doc-id 16075320,16075999  # varios na MESMA sessao
+python -m seibot.monitor coletivo --modo real [--doc-id N[,M]]       # DA CIENCIA e publica a pasta
+pytest -q                           # 231 testes (parser/classificar/store/notify/monitor/clientes/coletivo/…)
 ```
 
 Parser e classificador são **puros** (testáveis sem browser). A fixture real
@@ -506,8 +507,9 @@ pendente por decisão do usuário.
 Ofício que a Anatel manda para **várias empresas de uma vez**. Comando **`monitor coletivo
 --modo {ensaio|mapear|completo|real}`**. O bot abre → dá ciência (**uma** cobre todos os
 destinatários) → baixa ofício + anexos → **publica na biblioteca compartilhada com os
-clientes** → avisa o Teams com o link. **Sem e-mail, sem card, fora da Fase 3** — publicar
-na pasta É a entrega. Detalhe completo em `FASE-4-COLETIVO.md`.
+clientes** → avisa o Teams com o link. **Sem e-mail** — publicar na pasta É a entrega.
+(**Card e acompanhamento de prazo entraram em 2026-08-10** — ver a seção logo abaixo.)
+Detalhe completo em `FASE-4-COLETIVO.md`.
 
 - `seibot/coletivo.py` (pipeline), `seibot/biblioteca.py` (publicação), escrita em drive no
   `graph.py` (`item_do_drive` / `garantir_pasta` / `upload_arquivo`).
@@ -516,17 +518,45 @@ na pasta É a entrega. Detalhe completo em `FASE-4-COLETIVO.md`.
 - Seleção: **todo coletivo com ≥1 destinatário Pendente**, sem olhar cliente ativo (o ofício
   é indivisível e a pasta é do ofício, não da empresa).
 - `--modo real` tem as travas do individual (`TRATAR_AUTO=true` + dia útil, antes do login) e
-  aceita **`--doc-id`** para alvejar um ofício só.
+  aceita **`--doc-id`** para alvejar ofícios específicos — **vários separados por vírgula**,
+  tratados na MESMA sessão (um login = um código 2FA na caixa de uma pessoa real).
 - ⚠️ **Anexo do coletivo = o que o TEXTO do ofício cita** (`extrair_anexos`), e **não** os
   documentos que o SEI empacotou na intimação — o oposto da Fase 2. No 693 o SEI empacotou 3
   anexos, mas a Planilha "Tabela ISPs/Domínios" (16075319) não é do ofício e não pode ir ao
   cliente; o texto citava os 2 corretos. Contrapartida aceita: ofício que não cita um anexo
   real deixa o cliente sem ele (caso do Ofício 70) — por isso **o individual não mudou**.
 - ⚠️ **Coletivo TEM prazo, e curto**: os 9 da janela de 07/08 eram todos URGENTE com 5 dias.
-  Vai destacado com ⚠️ no Teams mas **não** entra no acompanhamento da Fase 3 (que depende da
-  raia do card, e coletivo não tem card) — decisão do usuário para não ampliar o escopo.
+  Vai destacado com ⚠️ no Teams e, desde 10/08, **entra no acompanhamento da Fase 3**.
 - Validado ao vivo em 07/08/2026: ciência real no **Ofício 693** (9 empresas, 1 confirmação,
   prazo 14/08) e pastas publicadas de 693 e 697.
+
+### Coletivo entrou no acompanhamento de prazos, com card (2026-08-10)
+
+A decisão de 07/08 (coletivo fora da Fase 3, prazo "controlado à mão") caiu junto com a
+premissa de que coletivo raramente tem prazo. Agora ele é acompanhado **como o individual**.
+
+- **Card no Kanban** via `oficio_card.montar_campos_coletivo` / `criar_card_coletivo`,
+  nascendo em **`STATUS_AGUARDANDO`** — a raia-gatilho da Fase 3. As 4 raias reais de
+  `StatusOficio` (conferidas ao vivo em 10/08): Aguardando documentação (cliente) · Minuta de
+  defesa em elaboração · Defesa enviada · Processo concluído.
+- **1 card por ofício, SEM CNPJ/Email/Telefone/Pacote** — são N empresas e o lookup só
+  apontaria para uma. Elas e o link da pasta ficam no comentário de proveniência
+  (`comentarios.texto_card_coletivo`).
+- **Card só quando há prazo.** Sem prazo não há o que acompanhar.
+- **1 lembrete por ofício.** Um coletivo rende N linhas em `tratadas` (uma por empresa);
+  `monitor._unidades_de_aviso` colapsa por `(processo, doc_id)`. ⚠️ Aviso, parada e "sem card"
+  gravam em **todas** as chaves da unidade — marcar só a representativa faria as outras N-1
+  voltarem no dia seguinte.
+- `tratadas` ganhou **`grupo_tipo`** ('individual'|'coletivo') e **`pasta_url`** (o link entra
+  no lembrete, que é o item acionável). Migração in-place em `_garantir_colunas`.
+- Saíram do código: `coletivo.MOTIVO_SEM_CARD` e o `parar_acompanhamento` que desligava o
+  acompanhamento do coletivo no ato de registrá-lo.
+- ⚠️ **Sem card não há acompanhamento**: a criação é best-effort (não derruba a publicação já
+  feita), então o alerta na DM do responsável técnico diz explicitamente que o prazo ficará
+  sem acompanhamento se o card falhar.
+- ⚠️ `marcar_tratado` só grava de fato quando `data_limite != ''` (proteção do prazo, ver o
+  incidente de 05/08) — numa tratativa **sem** prazo, `oficio_desc`/`grupo_tipo`/`pasta_url`
+  não chegam ao banco. Não afeta o acompanhamento (que exige prazo), mas confunde ao debugar.
 
 ### ⚠️ A coluna "Ações" é lazy — e isso derrubava a ciência em silêncio (2026-08-07)
 
@@ -584,6 +614,10 @@ significa processo resolvido — a mensagem diz isso explicitamente, a pedido do
 
 **A raia é consultada ANTES de qualquer aviso** (exigência do usuário): se o card já saiu,
 o que sai é a mensagem de parada, nunca mais um lembrete.
+
+**Cobre individual e coletivo** (desde 2026-08-10). O coletivo entra com **um** lembrete por
+ofício: suas N linhas em `tratadas` (uma por empresa) colapsam em `monitor._unidades_de_aviso`
+por `(processo, doc_id)`, e todo desfecho é gravado em todas as chaves da unidade.
 
 **Cadência** (`seibot/prazos.py`, tudo puro):
 

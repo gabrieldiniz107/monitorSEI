@@ -147,12 +147,23 @@ def _esc(s: object) -> str:
     return _html.escape(str(s), quote=False)
 
 
+def eh_coletivo(linha: dict) -> bool:
+    return (linha.get("grupo_tipo") or "individual") == "coletivo"
+
+
 def _cabecalho(linha: dict) -> list:
+    # No coletivo o ofício é um só para N empresas — o aviso é por OFÍCIO, então listar
+    # "Empresa: fulana" seria enganoso (e sairia N vezes). Ver `monitor.acompanhar_prazos`.
+    if eh_coletivo(linha):
+        empresa = (f"<b>Empresas:</b> {_esc(linha.get('empresas') or '?')} "
+                   "(ofício coletivo)")
+    else:
+        empresa = f"<b>Empresa:</b> {_esc(linha.get('empresa'))}"
     return [
         f"<b>Processo:</b> {_esc(linha.get('processo'))}",
         f"<b>Ofício:</b> {_esc(linha.get('oficio_desc') or 'Ofício')} "
         f"({_esc(linha.get('doc_id'))})",
-        f"<b>Empresa:</b> {_esc(linha.get('empresa'))}",
+        empresa,
     ]
 
 
@@ -178,8 +189,14 @@ def formatar_aviso(linha: dict, d: Decisao) -> str:
         linhas.append("👉 Mover o card para encerrar os avisos.")
     elif d.ultima_chance or d.faltam == 0:
         linhas.append("👉 Último momento para montar defesa ou pedir dilação de prazo.")
+    elif eh_coletivo(linha):
+        linhas.append("👉 Os clientes ainda não enviaram a documentação.")
     else:
         linhas.append("👉 Cliente ainda não enviou a documentação.")
+    pasta = linha.get("pasta_url") or ""
+    if pasta:
+        # sem escape: escapar o '&' quebraria o link do SharePoint (mesmo motivo do coletivo)
+        linhas.append(f'📁 <a href="{pasta}">Pasta compartilhada com os clientes</a>')
     return "<br>".join(linhas)
 
 

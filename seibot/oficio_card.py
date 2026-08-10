@@ -89,6 +89,30 @@ def montar_campos(grupo, intim, prazo, info, *, data_cumprimento: date) -> dict:
     return campos
 
 
+def montar_campos_coletivo(grupo, prazo, *, data_cumprimento: date) -> dict:
+    """Campos do card de um ofício COLETIVO (puro/testável).
+
+    Um ofício, um card — como a mensagem do Teams, que também é uma por ofício. Os campos
+    de cliente (`CNPJ`/`CNPJLookupId`/`CNPJsemFormatacao`, `Email`, `Telefone`, `Pacote`)
+    ficam **em branco**: são N empresas e o lookup só aponta para uma. Elas vão listadas no
+    comentário de proveniência do card (decisão do usuário, 2026-08-10).
+
+    Nasce na mesma raia do individual porque é ela que aciona o acompanhamento de prazos.
+    """
+    campos = {
+        "Title": grupo.processo,
+        "NumeroOficio": f"{grupo.oficio_desc} ({grupo.doc_id})",
+        "DataCumprimento": _iso_meia_noite(data_cumprimento),
+        "Prioridade": "Alta" if grupo.prioridade_urgente else "Média",
+        "StatusOficio": STATUS_AGUARDANDO,
+    }
+    if prazo is not None and prazo.data_limite:
+        iso = _iso_de_ddmmaaaa(prazo.data_limite)
+        if iso:
+            campos["DataVencimento"] = iso
+    return campos
+
+
 def criar_card(g, grupo, intim, prazo, info, *, data_cumprimento: Optional[date] = None,
                log=print) -> Optional[str]:
     """Cria o card na lista, **idempotente por Nº do Processo** (não duplica se já existe).
@@ -106,4 +130,19 @@ def criar_card(g, grupo, intim, prazo, info, *, data_cumprimento: Optional[date]
     novo = g.criar_item(LISTA_CONTROLE_OFICIO, campos)
     cid = str(novo.get("id") or "")
     log(f"   ✓ card criado no Controle de Ofício (id {cid})")
+    return cid
+
+
+def criar_card_coletivo(g, grupo, prazo, *, data_cumprimento: Optional[date] = None,
+                        log=print) -> Optional[str]:
+    """Card do ofício coletivo — mesma idempotência por Nº do Processo do individual."""
+    data_cumprimento = data_cumprimento or date.today()
+    existente = g.buscar_item(LISTA_CONTROLE_OFICIO, grupo.processo)
+    if existente is not None:
+        log(f"   • card já existe p/ {grupo.processo} (id {existente.get('id')}) — não duplica.")
+        return None
+    campos = montar_campos_coletivo(grupo, prazo, data_cumprimento=data_cumprimento)
+    novo = g.criar_item(LISTA_CONTROLE_OFICIO, campos)
+    cid = str(novo.get("id") or "")
+    log(f"   ✓ card do coletivo criado no Controle de Ofício (id {cid})")
     return cid

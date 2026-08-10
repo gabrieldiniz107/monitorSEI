@@ -233,14 +233,14 @@ def acompanhar_prazos(*, store: IntimacoesStore, cards: dict, hoje: date,
     """
     from . import prazos
 
-    linhas = store.em_acompanhamento()
+    unidades = _unidades_de_aviso(store.em_acompanhamento())
     avisos = paradas = sem_card = 0
-    for linha in linhas:
+    for linha, chaves in unidades:
         card = cards.get((linha["processo"], linha["doc_id"])) or cards.get((linha["processo"], ""))
         if card is None:
             log(f"  ⚠️ sem card: {linha['processo']} | doc {linha['doc_id']}")
             enviar(prazos.formatar_sem_card(linha))
-            store.parar_acompanhamento(linha["chave"], prazos.PARADA_SEM_CARD)
+            _parar_todas(store, chaves, prazos.PARADA_SEM_CARD)
             sem_card += 1
             continue
 
@@ -248,7 +248,7 @@ def acompanhar_prazos(*, store: IntimacoesStore, cards: dict, hoje: date,
         if status != oficio_card.STATUS_AGUARDANDO:
             log(f"  ⏹️ parou: {linha['processo']} — Kanban agora '{status or '(branco)'}'")
             enviar(prazos.formatar_parada(linha, prazos.PARADA_SAIU_DA_RAIA, status))
-            store.parar_acompanhamento(linha["chave"], prazos.PARADA_SAIU_DA_RAIA)
+            _parar_todas(store, chaves, prazos.PARADA_SAIU_DA_RAIA)
             paradas += 1
             continue
 
@@ -258,11 +258,53 @@ def acompanhar_prazos(*, store: IntimacoesStore, cards: dict, hoje: date,
             continue
         log(f"  ⏳ aviso: {linha['processo']} — faltam {d.faltam} dia(s)")
         enviar(prazos.formatar_aviso(linha, d))
-        store.marcar_aviso_prazo(linha["chave"], hoje.isoformat())
+        for chave in chaves:
+            store.marcar_aviso_prazo(chave, hoje.isoformat())
         avisos += 1
 
-    return {"status": "ok", "acompanhando": len(linhas), "avisos": avisos,
+    return {"status": "ok", "acompanhando": len(unidades), "avisos": avisos,
             "paradas": paradas, "sem_card": sem_card}
+
+
+def _unidades_de_aviso(linhas: list) -> list:
+    """Linhas de `tratadas` → unidades de aviso `(linha_representativa, [chaves])`.
+
+    Um ofício **coletivo** rende N linhas (uma por empresa) para um único ofício. Avisar por
+    linha encheria o grupo do Jurídico de N lembretes idênticos por dia, então elas colapsam
+    por `(processo, doc_id)` — decisão do usuário, 2026-08-10: **uma mensagem por ofício**.
+    Individual segue 1 linha = 1 unidade.
+
+    Todas as chaves da unidade viajam juntas porque os três desfechos (aviso, parada, sem
+    card) precisam ser gravados em todas — senão as empresas restantes voltariam amanhã.
+    """
+    from . import prazos
+
+    unidades: list = []
+    coletivos: dict = {}
+    for linha in linhas:
+        if not prazos.eh_coletivo(linha):
+            unidades.append((linha, [linha["chave"]]))
+            continue
+        alvo = coletivos.get((linha["processo"], linha["doc_id"]))
+        if alvo is None:
+            rep = dict(linha)
+            rep["empresas"] = 1
+            alvo = (rep, [linha["chave"]])
+            coletivos[(linha["processo"], linha["doc_id"])] = alvo
+            unidades.append(alvo)
+            continue
+        rep, chaves = alvo
+        rep["empresas"] += 1
+        chaves.append(linha["chave"])
+        # o dedup do dia vale para a unidade: basta uma linha já avisada hoje
+        if linha.get("acomp_ultimo_aviso") and not rep.get("acomp_ultimo_aviso"):
+            rep["acomp_ultimo_aviso"] = linha["acomp_ultimo_aviso"]
+    return unidades
+
+
+def _parar_todas(store: IntimacoesStore, chaves: list, motivo: str) -> None:
+    for chave in chaves:
+        store.parar_acompanhamento(chave, motivo)
 
 
 def _indexar_cards(g) -> dict:
@@ -292,8 +334,13 @@ def _cmd_coletivo(cfg: Config, modo: str = "ensaio", doc_id_alvo: str | None = N
     - `completo --doc-id N`: pipeline inteiro num coletivo JÁ CUMPRIDO, **sem** ciência —
       baixa, publica na pasta e notifica. É o ensaio-geral.
     - `real`: dá **CIÊNCIA** de verdade nos coletivos Pendentes e publica. Com `--doc-id N`
-      alveja um ofício só (usado para a primeira ciência à mão); sem a flag trata o lote,
-      que é como o cron roda.
+      alveja ofícios específicos (usado para a primeira ciência à mão); sem a flag trata o
+      lote, que é como o cron roda.
+
+    `--doc-id` aceita **vários ids separados por vírgula**: o login e a coleta acontecem uma
+    vez só e todos os alvos são tratados na mesma sessão. Cada execução dispara um código 2FA
+    no e-mail de uma pessoa real e a sessão do SEI expira em poucos minutos — juntar os
+    ofícios numa execução é a regra, não a exceção.
     """
     from . import coletivo as col
     from . import sessao, tratativa
@@ -308,7 +355,8 @@ def _cmd_coletivo(cfg: Config, modo: str = "ensaio", doc_id_alvo: str | None = N
         if not datas.eh_dia_util(date.today()):
             return {"status": "ok", "modo": "real", "candidatos": 0, "tratados": 0,
                     "pulado": "fim de semana — ciência só em dia útil"}
-    if modo in ("mapear", "completo") and not doc_id_alvo:
+    alvos = [d.strip() for d in (doc_id_alvo or "").split(",") if d.strip()]
+    if modo in ("mapear", "completo") and not alvos:
         return {"status": "erro", "erro": f"modo {modo} exige --doc-id <id do documento>."}
 
     clientes = clientes_mod.carregar_clientes()
@@ -323,38 +371,59 @@ def _cmd_coletivo(cfg: Config, modo: str = "ensaio", doc_id_alvo: str | None = N
         grupos = classificar.agrupar_por_oficio(intims)
 
         if modo in ("mapear", "completo"):
-            g = next((x for x in grupos if x.doc_id == doc_id_alvo), None)
-            if g is None:
-                return {"status": "erro", "erro": f"ofício doc {doc_id_alvo} não achado na página."}
-            if g.tipo != "coletivo":
-                return {"status": "erro",
-                        "erro": f"ofício {g.doc_id} é individual — use 'tratar' (Fase 2)."}
-            if modo == "mapear":
-                return {"status": "ok", "modo": "mapear", **col.mapear(sess, g)}
-            if any(i.situacao == tratativa.SITUACAO_PENDENTE for i in g.destinatarios):
-                return {"status": "erro",
-                        "erro": "ABORTADO: há destinatário Pendente — o ensaio-completo só "
-                                "roda em ofício já cumprido (para não dar ciência)."}
-            print(f"\n===== COLETIVO (ENSAIO-COMPLETO) em {g.processo} / {g.oficio_desc} "
-                  f"({g.doc_id}) — SEM dar ciência =====")
-            r = col.tratar_coletivo(sess, cfg, g, clientes, store, g_graph,
-                                    dar_ciencia=False,
-                                    url_teams=cfg.teams_webhook_url or None)
-            return {"status": "ok", "modo": "completo", **r}
+            # vários alvos rodam na MESMA sessão: um erro num ofício não pode custar outro
+            # login (= outro código 2FA) para os demais, então é coletado e o laço segue.
+            resultados, recusas = [], []
+            for alvo_id in alvos:
+                g = next((x for x in grupos if x.doc_id == alvo_id), None)
+                if g is None:
+                    recusas.append(f"{alvo_id}: não achado na página")
+                    continue
+                if g.tipo != "coletivo":
+                    recusas.append(f"{alvo_id}: é individual — use 'tratar' (Fase 2)")
+                    continue
+                if modo == "mapear":
+                    resultados.append({"doc_id": alvo_id, **col.mapear(sess, g)})
+                    continue
+                if any(i.situacao == tratativa.SITUACAO_PENDENTE for i in g.destinatarios):
+                    recusas.append(f"{alvo_id}: ABORTADO, há destinatário Pendente — o "
+                                   "ensaio-completo só roda em ofício já cumprido")
+                    continue
+                print(f"\n===== COLETIVO (ENSAIO-COMPLETO) em {g.processo} / {g.oficio_desc} "
+                      f"({g.doc_id}) — SEM dar ciência =====")
+                try:
+                    resultados.append(col.tratar_coletivo(
+                        sess, cfg, g, clientes, store, g_graph, dar_ciencia=False,
+                        url_teams=cfg.teams_webhook_url or None))
+                except Exception as e:  # noqa: BLE001 — segue para os outros alvos da sessão
+                    print(f"  erro no coletivo {g.processo}: {e}")
+                    recusas.append(f"{alvo_id}: {type(e).__name__}: {e}")
+                    erros.notificar_erro(cfg, f"coletivo --modo {modo} · {g.processo}", e)
+            if not resultados:
+                return {"status": "erro", "modo": modo,
+                        "erro": "; ".join(recusas) or "nenhum alvo processado"}
+            saida = {"status": "ok" if not recusas else "parcial", "modo": modo,
+                     "alvos": len(alvos), "resultados": resultados}
+            if recusas:
+                saida["recusas"] = recusas
+            return saida
 
         candidatos = col.selecionar_candidatos(grupos, store)
-        if doc_id_alvo:
-            # alveja UM ofício. Existe para a primeira ciência coletiva ser feita à mão e
-            # conferida no SEI antes de o cron soltar o modo real sobre o lote inteiro.
-            candidatos = [g for g in candidatos if g.doc_id == doc_id_alvo]
+        if alvos:
+            # alveja ofícios específicos. Existe para a primeira ciência coletiva ser feita à
+            # mão e conferida no SEI antes de o cron soltar o modo real sobre o lote inteiro.
+            candidatos = [g for g in candidatos if g.doc_id in alvos]
             if not candidatos:
-                alvo = next((x for x in grupos if x.doc_id == doc_id_alvo), None)
-                motivo = ("não achado na página" if alvo is None
-                          else col.motivo_nao_candidato(
-                              alvo, ja_tratado=all(store.ja_tratado(i.chave)
-                                                   for i in alvo.destinatarios)))
+                motivos = []
+                for alvo_id in alvos:
+                    alvo = next((x for x in grupos if x.doc_id == alvo_id), None)
+                    motivos.append(f"{alvo_id}: " + (
+                        "não achado na página" if alvo is None
+                        else str(col.motivo_nao_candidato(
+                            alvo, ja_tratado=all(store.ja_tratado(i.chave)
+                                                 for i in alvo.destinatarios)))))
                 return {"status": "erro",
-                        "erro": f"ofício doc {doc_id_alvo} não é candidato: {motivo}"}
+                        "erro": "nenhum ofício alvo é candidato — " + "; ".join(motivos)}
         if modo == "ensaio":
             print(f"\n===== COLETIVO (ENSAIO): {len(candidatos)} candidato(s) — NADA foi aberto =====")
             for g in candidatos:
@@ -517,7 +586,9 @@ def main(argv=None) -> int:
                         help="nº do processo (para 'tratar --modo completo')")
     parser.add_argument("--doc-id", dest="doc_id", default=None,
                         help="id do documento no SEI — desambigua processo com mais de "
-                             "uma intimação (para 'tratar --modo completo')")
+                             "uma intimação (para 'tratar --modo completo'). No 'coletivo' "
+                             "aceita vários separados por vírgula, tratados na MESMA sessão "
+                             "(um login, um código 2FA)")
     args = parser.parse_args(argv)
 
     # o load_config pode falhar (.env incompleto) antes de existir cfg p/ notificar
