@@ -158,7 +158,9 @@ def _cabecalho(linha: dict) -> list:
         empresa = (f"<b>Empresas:</b> {_esc(linha.get('empresas') or '?')} "
                    "(ofício coletivo)")
     else:
-        empresa = f"<b>Empresa:</b> {_esc(linha.get('empresa'))}"
+        # linhas antigas (anteriores à coluna `empresa`) vêm com NULL — "Empresa: None" na
+        # mensagem do Jurídico parece bug do bot
+        empresa = f"<b>Empresa:</b> {_esc(linha.get('empresa') or '—')}"
     return [
         f"<b>Processo:</b> {_esc(linha.get('processo'))}",
         f"<b>Ofício:</b> {_esc(linha.get('oficio_desc') or 'Ofício')} "

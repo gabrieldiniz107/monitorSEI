@@ -354,3 +354,11 @@ def test_coletivos_diferentes_nao_se_misturam(tmp_path):
     r = monitor.acompanhar_prazos(store=store, cards=cards, hoje=date(2026, 8, 19),
                                   enviar=enviadas.append, log=lambda *a: None)
     assert r["acompanhando"] == 2 and len(enviadas) == 2
+
+
+def test_linha_antiga_sem_empresa_nao_mostra_none():
+    """Linhas gravadas antes da coluna `empresa` vêm NULL — "Empresa: None" na mensagem do
+    Jurídico parece bug do bot (visto ao rodar contra o banco real, 10/08/2026)."""
+    msg = prazos.formatar_sem_card({"processo": "P", "doc_id": "1", "empresa": None,
+                                    "data_limite": "20/08/2026"})
+    assert "None" not in msg and "Empresa:</b> —" in msg
