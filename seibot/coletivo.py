@@ -216,6 +216,35 @@ def tratar_coletivo(sess, cfg, grupo: Grupo, clientes, store, g_graph, *,
                                   empresa=f"{len(grupo.destinatarios)} empresas (coletivo)") from e
 
 
+TENTATIVAS_PROTOCOLOS = 3
+
+
+def _protocolos_com_oficio(page, grupo: Grupo, log) -> dict:
+    """Lista de Protocolos, com releitura enquanto o ofício não aparecer nela.
+
+    ⚠️ Processo grande pode não terminar de renderizar a tabela inteira dentro da espera
+    FIXA (~11s) do `abrir_processo` — a mesma classe de problema que já obrigou
+    `_aceites_de_pendente` a reler os ícones de aceite (ver seu docstring), só que aqui
+    sem essa proteção. Foi o que derrubou o Ofício 694 (proc 53500.102006/2026-93,
+    11/08/2026): a ciência tinha sido dada de verdade, mas `mapa_protocolos` leu a página
+    cedo demais, não achou o doc, e o pipeline abortou sem publicar nem avisar ninguém —
+    com o prazo já correndo. Reabrir e reler, como o `_aceites_de_pendente` já faz, resolve.
+    """
+    from . import processo
+
+    protos: dict = {}
+    for tentativa in range(1, TENTATIVAS_PROTOCOLOS + 1):
+        protos = processo.mapa_protocolos(page)
+        if grupo.doc_id in protos:
+            return protos
+        if tentativa < TENTATIVAS_PROTOCOLOS:
+            log(f"   ⚠️ ofício {grupo.doc_id} ainda não está na Lista de Protocolos "
+                f"(tentativa {tentativa}/{TENTATIVAS_PROTOCOLOS}) — processo grande, "
+                "recarregando…")
+            processo.abrir_processo(page, grupo.destinatarios[0].consulta_url)
+    return protos
+
+
 def _apos_ciencia(sess, cfg, grupo: Grupo, clientes, store, g_graph, *,
                   publicar: bool, url_teams, ciencias: int, log) -> dict:
     """Da Lista de Protocolos até o Teams. Separado para que toda falha aqui seja
@@ -224,7 +253,7 @@ def _apos_ciencia(sess, cfg, grupo: Grupo, clientes, store, g_graph, *,
     from .teams import enviar_teams_webhook
 
     page, ctx = sess.page, sess.context
-    protos = processo.mapa_protocolos(page)
+    protos = _protocolos_com_oficio(page, grupo, log)
     if not protos:
         raise RuntimeError("Lista de Protocolos vazia mesmo após a ciência — abortado.")
 
@@ -235,7 +264,9 @@ def _apos_ciencia(sess, cfg, grupo: Grupo, clientes, store, g_graph, *,
 
     of = protos.get(grupo.doc_id)
     if not of:
-        raise RuntimeError(f"ofício {grupo.doc_id} não achado na Lista de Protocolos")
+        raise RuntimeError(
+            f"ofício {grupo.doc_id} não achado na Lista de Protocolos após "
+            f"{TENTATIVAS_PROTOCOLOS} releituras")
     of_bytes = processo.baixar(ctx, of["url"])
     oficio_texto = processo.extrair_texto_oficio(of_bytes)
 

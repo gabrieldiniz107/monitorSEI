@@ -318,6 +318,49 @@ def test_sem_pendente_nem_le_os_icones(processo_fake):
         monkey.undo()
 
 
+# ------------------------------------------ pós-ciência: releitura da Lista de Protocolos
+def test_protocolos_relidos_quando_oficio_ainda_nao_apareceu(monkeypatch):
+    """Processo grande pode não terminar de renderizar a Lista de Protocolos na primeira
+    leitura — religa e tenta de novo antes de desistir (Ofício 694, 11/08/2026: a ciência
+    tinha sido dada de verdade e o pipeline abortou por ler a página cedo demais)."""
+    import seibot.processo as real
+
+    chamadas = {"mapa": 0, "reabre": 0}
+
+    def mapa(page):
+        chamadas["mapa"] += 1
+        if chamadas["mapa"] < 2:
+            return {}
+        return {"15960502": {"url": "u", "tipo": "Ofício 600"}}
+
+    def reabre(page, url, tentativas=3):
+        chamadas["reabre"] += 1
+
+    monkeypatch.setattr(real, "mapa_protocolos", mapa)
+    monkeypatch.setattr(real, "abrir_processo", reabre)
+
+    g = _grupo(*[_intim(str(n)) for n in range(2)])
+    protos = coletivo._protocolos_com_oficio(None, g, lambda *_: None)
+
+    assert protos["15960502"]["tipo"] == "Ofício 600"
+    assert chamadas["mapa"] == 2
+    assert chamadas["reabre"] == 1
+
+
+def test_protocolos_desiste_apos_as_tentativas_e_devolve_o_que_tiver(monkeypatch):
+    """Sem o ofício depois de todas as releituras, `_apos_ciencia` precisa do dict (mesmo
+    incompleto) pra distinguir 'vazio' de 'ofício específico faltando' na mensagem de erro."""
+    import seibot.processo as real
+
+    monkeypatch.setattr(real, "mapa_protocolos",
+                        lambda page: {"999": {"url": "u", "tipo": "Outro"}})
+    monkeypatch.setattr(real, "abrir_processo", lambda *a, **k: None)
+
+    g = _grupo(_intim("111"))
+    protos = coletivo._protocolos_com_oficio(None, g, lambda *_: None)
+    assert protos == {"999": {"url": "u", "tipo": "Outro"}}
+
+
 # ------------------------------------------ pós-ciência: card + acompanhamento de prazo
 class _GraphCards:
     def __init__(self):
