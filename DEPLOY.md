@@ -10,6 +10,7 @@ cp .env.example .env   # (ou copiar o .env) e preencher:
 #   SEI_EMAIL / SEI_PASSWORD
 #   IMAP_USER / IMAP_APP_PASSWORD   (Gmail do Rodrigo, senha de app)
 #   TEAMS_WEBHOOK_INTIMACOES_URL    (webhook do fluxo do Power Automate)
+#   TEAMS_WEBHOOK_ERROS_URL         (canal AUTOMACOES - ALERTAS; destino dos erros)
 #   HEADLESS=true
 mkdir -p state
 docker compose build

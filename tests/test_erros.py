@@ -40,18 +40,48 @@ def test_trunca_traceback_gigante():
     assert "truncado" in m and len(m) < 12000
 
 
-def test_erro_vai_para_a_DM_quando_ha_dev_email(monkeypatch):
+def test_erro_vai_para_o_CANAL_mesmo_havendo_dev_email(monkeypatch):
+    """O canal vem antes da DM: a DM depende de token que expira, o canal não."""
     cfg = _Cfg()
     cfg.teams_dev_email = "gabriel.albuquerque@scmengenharia.com.br"
     cfg.teams_webhook_erros_url = "https://webhook"
     enviados = []
     import seibot.teams_dm as dm
-    monkeypatch.setattr(dm, "enviar_dm", lambda c, corpo, **k: enviados.append(corpo))
-    monkeypatch.setattr(erros, "enviar_teams_webhook",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("não usar webhook")))
+    monkeypatch.setattr(dm, "enviar_dm",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("não usar DM")))
+    monkeypatch.setattr(erros, "enviar_payload",
+                        lambda url, payload, **k: enviados.append((url, payload)))
 
     assert erros.notificar_erro(cfg, "ctx", _erro(), log=lambda *a: None) is True
-    assert len(enviados) == 1 and "ERRO no monitorSEI" in enviados[0]
+    url, payload = enviados[0]
+    assert url == "https://webhook"
+    corpo = payload["attachments"][0]["content"]["body"]
+    assert "ERRO no monitorSEI" in corpo[0]["text"]
+    assert payload["attachments"][0]["contentType"] == \
+        "application/vnd.microsoft.card.adaptive"
+
+
+def test_card_nao_leva_HTML(monkeypatch):
+    """Card não renderiza HTML — as tags do `detalhe` têm de sair antes."""
+    linhas, trace = erros.partes_do_erro(
+        "ctx", _erro("x"), detalhe="<b>Processo</b> 123<br>etapa &amp; ciência")
+    juntos = " ".join(linhas)
+    assert "<b>" not in juntos and "<br>" not in juntos
+    assert "Processo 123" in juntos and "etapa & ciência" in juntos
+
+
+def test_DM_e_usada_quando_o_canal_falha(monkeypatch):
+    """Webhook fora do ar não pode perder o aviso: cai para a DM."""
+    cfg = _Cfg()
+    cfg.teams_dev_email = "gabriel.albuquerque@scmengenharia.com.br"
+    cfg.teams_webhook_erros_url = "https://webhook"
+    enviados = []
+    import seibot.teams_dm as dm
+    monkeypatch.setattr(erros, "enviar_payload",
+                        lambda *a, **k: (_ for _ in ()).throw(ConnectionError("rede caiu")))
+    monkeypatch.setattr(dm, "enviar_dm", lambda c, corpo, **k: enviados.append(corpo))
+    assert erros.notificar_erro(cfg, "ctx", _erro(), log=lambda *a: None) is True
+    assert len(enviados) == 1
 
 
 def test_nunca_manda_erro_para_o_grupo_do_juridico():
@@ -62,12 +92,12 @@ def test_nunca_manda_erro_para_o_grupo_do_juridico():
     assert erros.notificar_erro(cfg, "ctx", _erro(), log=lambda *a: None) is False
 
 
-def test_webhook_de_erros_e_usado_se_nao_ha_dev_email(monkeypatch):
+def test_webhook_de_erros_e_usado_sem_dev_email(monkeypatch):
     cfg = _Cfg()
     cfg.teams_webhook_erros_url = "https://erros"
     urls = []
-    monkeypatch.setattr(erros, "enviar_teams_webhook",
-                        lambda url, corpo, style="text", **k: urls.append(url))
+    monkeypatch.setattr(erros, "enviar_payload",
+                        lambda url, payload, **k: urls.append(url))
     assert erros.notificar_erro(cfg, "ctx", _erro(), log=lambda *a: None) is True
     assert urls == ["https://erros"]
 
@@ -98,5 +128,5 @@ def test_falha_no_webhook_nao_propaga(monkeypatch):
     def _explode(*a, **k):
         raise ConnectionError("rede caiu")
 
-    monkeypatch.setattr(erros, "enviar_teams_webhook", _explode)
+    monkeypatch.setattr(erros, "enviar_payload", _explode)
     assert erros.notificar_erro(cfg, "ctx", _erro(), log=lambda *a: None) is False

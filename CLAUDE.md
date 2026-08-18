@@ -286,10 +286,24 @@ aborta sem tocar em nada. `ensaio`/`completo` passam `dar_ciencia=False`; só `r
 Rodar **tudo automático** no cron, com **alerta de erro no Teams do responsável técnico**.
 Implementado:
 
-- **`seibot/erros.py`** — `notificar_erro(cfg, contexto, exc, critico=)`. Manda traceback para
-  a **DM do responsável técnico** (`TEAMS_DEV_EMAIL`). **Nunca levanta** — falhar ao avisar
-  não pode virar uma segunda falha. Trunca traceback em 2500 chars, escapa HTML.
+- **`seibot/erros.py`** — `notificar_erro(cfg, contexto, exc, critico=)`. **Nunca levanta**
+  — falhar ao avisar não pode virar uma segunda falha. Trunca traceback em 2500 chars.
   **Erro NUNCA vai para o grupo do Jurídico** (é ruído; eles não têm o que fazer com isso).
+
+  **Ordem de destino invertida em 18/08/2026** (decisão do Gabriel): primeiro o canal
+  **AUTOMAÇÕES - ALERTAS** (`TEAMS_WEBHOOK_ERROS_URL`, webhook do Workflows), e a DM do
+  `TEAMS_DEV_EMAIL` como **reserva**. O motivo é a natureza do canal de erro: ele avisa
+  quando algo quebrou, e uma das coisas que quebram é o próprio refresh token delegado
+  (expira, exige login interativo). Com o webhook na frente, a falha do token continua
+  sendo avisada. É o mesmo canal e o mesmo raciocínio dos projetos irmãos
+  (`automacaoColetas`, `automacaoVistorias`).
+
+  ⚠️ O card do Teams **não renderiza HTML** — `formatar_erro()` (HTML) serve só à DM; o
+  card usa `partes_do_erro()`, que devolve texto puro. Mandar o HTML no card exibiria as
+  tags cruas. O layout do card é FactSet (Onde/Erro/Detalhe/Quando) + a última linha do
+  traceback em destaque + o traceback completo em monoespaçado. Sem botão de
+  "ver detalhes": `Action.ToggleVisibility` nem sempre renderiza em mensagem postada por
+  webhook, e esconder o traceback atrás de um botão que não aparece perderia o essencial.
 - **`seibot/teams_dm.py`** — DM via **Graph delegado**, porte do
   `automacaoVistorias/cft/src/teams_notify.py`. Chat no Graph **não funciona app-only** →
   login device-code único (`python -m seibot.teams_dm --login`), refresh token em
