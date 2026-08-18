@@ -202,6 +202,47 @@ def formatar_aviso(linha: dict, d: Decisao) -> str:
     return "<br>".join(linhas)
 
 
+def formatar_minuta_dilacao(linha: dict, url: str, minuta, pasta_url: str = "",
+                            extras: int = 0) -> str:
+    """Avisa que a minuta de dilação foi gerada e onde ela está.
+
+    Mensagem **separada** do lembrete de prazo de propósito: se a geração falhar, o aviso de
+    última chance sai intacto — ele é o que não pode faltar.
+    """
+    linhas = ["📄 <b>Minuta de pedido de dilação de prazo gerada</b>"] + _cabecalho(linha)
+    linhas.append(f"<b>Vencimento:</b> {_esc(linha.get('data_limite'))}")
+    if minuta.dias_pedidos:
+        unidade = (linha.get("prazo_unidade") or "dias").strip() or "dias"
+        linhas.append(f"<b>Dilação requerida:</b> {minuta.dias_pedidos} {_esc(unidade)}")
+    if minuta.admite_dilacao is False:
+        # o modelo leu o ofício e NÃO achou cláusula que autorize dilação (ex.: Notificação
+        # de Lançamento tributária, cujo remédio é impugnação). A peça é gerada assim mesmo
+        # — decisão do usuário —, mas protocolar sem conferir seria pedir indeferimento.
+        linhas.append("🛑 <b>Atenção:</b> não foi encontrada no ofício cláusula que autorize "
+                      "dilação de prazo. Conferir se o pedido cabe neste caso — pode ser que "
+                      "o remédio correto seja outro (impugnação, recurso).")
+    elif minuta.admite_dilacao is None:
+        linhas.append("ℹ️ <i>O texto do ofício não estava guardado: a minuta saiu no modelo "
+                      "padrão, sem leitura do caso.</i>")
+    if minuta.lacunas:
+        linhas.append(f"⚠️ <b>{len(minuta.lacunas)} lacuna(s)</b> a preencher: "
+                      + _esc(", ".join(minuta.lacunas)))
+        linhas.append("Buscar por <b>[PREENCHER: …]</b> no documento.")
+    # os dois links, de propósito (pedido do usuário): o arquivo abre direto no Word para
+    # revisar; a pasta é onde ficam as versões ajustadas e o resto do caso.
+    # Sem escape: escapar o '&' quebraria o link do SharePoint.
+    if url:
+        linhas.append(f'📝 <a href="{url}">Abrir a minuta (Word)</a>')
+    if pasta_url:
+        junto = (f" — com o ofício e {extras - 1} anexo(s) para conferência"
+                 if extras > 1 else " — com o ofício para conferência" if extras == 1 else "")
+        linhas.append(f'📁 <a href="{pasta_url}">Abrir a pasta da minuta</a>{junto}')
+    linhas.append("👉 <b>Revisar, ajustar e protocolar no SEI.</b> A automação "
+                  "<b>não</b> peticiona — e o pedido de dilação não suspende nem interrompe "
+                  "o prazo, então os lembretes continuam até o card sair da raia.")
+    return "<br>".join(linhas)
+
+
 def formatar_parada(linha: dict, motivo: str, status_atual: str = "") -> str:
     """Avisa que a automação PAROU de contar. Não significa processo resolvido —
     só que o gatilho da contagem (a raia do Kanban) deixou de valer."""

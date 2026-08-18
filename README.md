@@ -83,6 +83,20 @@ e-mail ao cliente na caixa do Jurídico (humano revisa e envia). Reporta tudo no
 login. **Anexos vêm da Lista de Protocolos**, não do texto do ofício (o ofício nem sempre
 cita todos).
 
+## Comandos (Fase 5 — minuta de dilação de prazo)
+```bash
+python -m seibot.monitor dilacao --modo ensaio [--doc-id N]   # gera em state/minutas/, sem publicar
+python -m seibot.monitor dilacao --modo gerar --doc-id N      # publica no SharePoint e avisa o Teams
+```
+No aviso de **"última chance"** do `prazos`, o bot monta um **pedido de dilação em Word**,
+publica na pasta **interna** *Gestão Integrada → Documentos → Jurídico → Minutas de Dilação
+de Prazo* — junto com **o ofício e os anexos**, para conferir sem voltar ao SEI — e manda ao
+grupo do Jurídico **o link do arquivo e o da pasta**. Tudo o que não se sabe com segurança sai como
+**`[PREENCHER: …]`** — a peça é uma **minuta para revisão humana**. **O bot não peticiona no
+SEI**, e o pedido de dilação não suspende o prazo: os lembretes continuam.
+
+Exige `DILACAO_AUTO=true` (trava, como o `TRATAR_AUTO`) e `DILACAO_ASSINANTE` no `.env`.
+
 ## Erros
 Qualquer exceção, mapeada ou não, vira **DM no Teams** do `TEAMS_DEV_EMAIL` (Graph delegado,
 mesmo padrão do `automacaoVistorias`). Nunca vai para o grupo do Jurídico. Login único:

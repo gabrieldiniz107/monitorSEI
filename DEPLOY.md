@@ -11,6 +11,7 @@ cp .env.example .env   # (ou copiar o .env) e preencher:
 #   IMAP_USER / IMAP_APP_PASSWORD   (Gmail do Rodrigo, senha de app)
 #   TEAMS_WEBHOOK_INTIMACOES_URL    (webhook do fluxo do Power Automate)
 #   TEAMS_WEBHOOK_ERROS_URL         (canal AUTOMACOES - ALERTAS; destino dos erros)
+#   DILACAO_ASSINANTE               (Fase 5; ver secao "minuta de dilacao" no fim)
 #   HEADLESS=true
 mkdir -p state
 docker compose build
@@ -131,3 +132,31 @@ eles façam a respeito.
 
 O `state/` (volume) guarda `intimacoes.db` (dedup + tabela `tratadas`) e `sei_state.json`.
 Não versionar.
+
+## Fase 5 — minuta de dilação de prazo
+
+Não muda o cron: a geração pega carona no `prazos` das 08:30, no aviso de "última chance".
+
+1. `git pull` + **`docker compose build`** — obrigatório: produção roda **da imagem** (o
+   `docker-compose.yml` só monta `./state`), e entra a dep nova **`python-docx`**.
+2. No `.env` da VPS:
+   ```
+   DILACAO_AUTO=false          # ligar só depois de conferir a 1ª minuta
+   DILACAO_ASSINANTE=Rodrigo Silva Oliveira
+   DILACAO_ASSINANTE_CARGO=Procurador
+   DILACAO_CIDADE_PADRAO=      # só usada quando o cadastro não tem município
+   ```
+3. Conferir uma minuta à mão, sem publicar nada nem avisar ninguém:
+   ```bash
+   docker compose run --rm sei-monitor python -m seibot.monitor dilacao --modo ensaio
+   ```
+   Os `.docx` saem em `state/minutas/` (volume), e o log lista as lacunas de cada um.
+4. Publicar uma de verdade (SharePoint + Teams), para validar o caminho completo:
+   ```bash
+   docker compose run --rm sei-monitor python -m seibot.monitor dilacao --modo gerar --doc-id <N>
+   ```
+5. Só então `DILACAO_AUTO=true`.
+
+⚠️ A minuta vai para a biblioteca **INTERNA** (Gestão Integrada → Documentos → `Jurídico/
+Minutas de Dilação de Prazo`), **nunca** para a pasta compartilhada com os clientes da Fase 4.
+A pasta raiz é criada sozinha na primeira execução (`graph.garantir_caminho`).

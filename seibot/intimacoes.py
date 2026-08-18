@@ -117,15 +117,44 @@ def _ir_para_intimacoes(page, *, log=print) -> None:
         page.goto(href, wait_until="commit")
     except Exception as e:  # SEI mantém conexões abertas; 'commit' às vezes estoura
         log(f"  (aviso goto: {e})")
-    page.wait_for_selector(TABELA_SELECTOR, timeout=30000)
-    # settle: a tabela (~200KB) pode ainda estar renderizando após o 'commit';
-    # ler content() cedo demais corta linhas. Espera o rodapé de paginação, que
-    # renderiza depois do corpo da tabela.
+    _esperar_tabela(page)
+
+
+def _esperar_tabela(page, timeout: int = 30000) -> None:
+    """Espera a listagem estar pronta para ser lida.
+
+    Ordem importa: primeiro o **load state**, senão `page.content()` estoura com
+    "Unable to retrieve content because the page is navigating" — foi o que derrubava a
+    paginação e o filtro (achado em 18/08/2026, ao tentar alcançar uma intimação antiga).
+    Depois a tabela, e só então o settle: a tabela (~200KB) pode ainda estar renderizando
+    após o 'commit', e ler cedo demais corta linhas.
+    """
+    for estado in ("domcontentloaded", "load"):
+        try:
+            page.wait_for_load_state(estado, timeout=timeout)
+        except Exception:
+            pass
+    page.wait_for_selector(TABELA_SELECTOR, timeout=timeout)
     try:
         page.wait_for_selector("#lnkInfraProximaPaginaInferior, #divInfraAreaTabela", timeout=10000)
     except Exception:
         pass
     page.wait_for_timeout(2500)
+
+
+def ler_html(page, tentativas: int = 3) -> str:
+    """`page.content()` à prova de navegação em curso (o postback do SEI é assíncrono)."""
+    ultimo = None
+    for _ in range(tentativas):
+        try:
+            return page.content()
+        except Exception as e:  # noqa: BLE001 — "page is navigating": esperar e reler
+            ultimo = e
+            try:
+                page.wait_for_load_state("load", timeout=15000)
+            except Exception:
+                page.wait_for_timeout(1500)
+    raise RuntimeError(f"não foi possível ler a página após {tentativas} tentativas: {ultimo}")
 
 
 def _avancar_pagina(page, *, log=print) -> bool:
@@ -136,14 +165,18 @@ def _avancar_pagina(page, *, log=print) -> bool:
         antes = page.locator("#hdnInfraPaginaAtual").get_attribute("value")
     except Exception:
         antes = None
-    # o link é onclick JS (javascript:void) → chamar a função global, não clicar
+    # o link é onclick JS (javascript:void) → chamar a função global, não clicar.
+    # O postback navega: esperar a navegação TERMINAR antes de ler qualquer coisa.
     try:
-        page.evaluate("infraAcaoPaginar('+',0,'Infra', null)")
+        with page.expect_navigation(wait_until="domcontentloaded", timeout=30000):
+            try:
+                page.evaluate("infraAcaoPaginar('+',0,'Infra', null)")
+            except Exception:
+                pass  # o postback destrói o contexto do evaluate — esperado
     except Exception:
-        pass  # o postback pode interromper o evaluate — esperado
+        pass      # sem navegação detectada: ainda assim conferimos a tabela abaixo
     try:
-        page.wait_for_selector(TABELA_SELECTOR, timeout=30000)
-        page.wait_for_timeout(1000)
+        _esperar_tabela(page)
     except Exception as e:
         log(f"  (aviso paginação: {e})")
         return False
@@ -163,7 +196,7 @@ def _iter_paginas(page, *, paginas: int, log=print) -> Iterator[str]:
     para detectar novidades. Não toca na coluna 'Ações'.
     """
     for n in range(1, paginas + 1):
-        html = page.content()
+        html = ler_html(page)
         yield html
         m = _TOTAL_RE.search(html)
         if m:  # já cobrimos tudo?

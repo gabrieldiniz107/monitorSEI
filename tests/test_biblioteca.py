@@ -89,3 +89,92 @@ def test_falha_ao_subir_propaga():
     with pytest.raises(RuntimeError):
         biblioteca.publicar(_Quebra(), _grupo(_intim("1"), _intim("2")), b"%PDF",
                             log=lambda *_: None)
+
+
+# ------------------------------------------------------------------ Fase 5: minuta (INTERNO)
+class _GraphCaminho(_GraphFake):
+    """Fake que também sabe criar árvore de pastas (garantir_caminho é do Graph real)."""
+
+    def __init__(self):
+        super().__init__()
+        self.caminhos, self.drives_upload = [], []
+
+    def garantir_caminho(self, drive_id, caminho):
+        self.caminhos.append((drive_id, caminho))
+        return {"webUrl": f"https://sharepoint/{caminho}", "id": "pasta"}
+
+    def upload_arquivo(self, drive_id, caminho, conteudo, mime="x"):
+        self.drives_upload.append(drive_id)
+        super().upload_arquivo(drive_id, caminho, conteudo, mime)
+        return {"webUrl": f"https://sharepoint/{caminho}", "id": "arq"}
+
+
+def test_minuta_vai_para_a_biblioteca_INTERNA_nunca_para_a_dos_clientes():
+    """A pasta da Fase 4 é compartilhada com os clientes; minuta é peça em elaboração."""
+    assert biblioteca.DRIVE_GESTAO_INTEGRADA != biblioteca.DRIVE_DOCUMENTOS
+    fake = _GraphCaminho()
+    biblioteca.publicar_minuta(fake, "Ofício 99", "15736628", "Pedido.docx", b"PK-docx",
+                               log=lambda *_: None)
+    assert all(drive == biblioteca.DRIVE_GESTAO_INTEGRADA for drive, _ in fake.caminhos)
+    assert fake.drives_upload == [biblioteca.DRIVE_GESTAO_INTEGRADA]
+    assert biblioteca.DRIVE_DOCUMENTOS not in fake.drives_upload
+
+
+def test_publicar_minuta_monta_o_caminho_e_devolve_o_link_do_ARQUIVO():
+    fake = _GraphCaminho()
+    pub = biblioteca.publicar_minuta(fake, "Ofício 99", "15736628",
+                                     "Pedido de Dilacao de Prazo - Bkup.docx",
+                                     b"PK-docx", log=lambda *_: None)
+    esperado = ("Jurídico/Minutas de Dilação de Prazo/Ofício 99 (15736628)/"
+                "Pedido de Dilacao de Prazo - Bkup.docx")
+    assert [c for c, _, _ in fake.uploads] == [esperado]
+    # a árvore inteira é garantida (a raiz 'Jurídico/…' ainda não existia na biblioteca)
+    assert fake.caminhos == [(biblioteca.DRIVE_GESTAO_INTEGRADA,
+                              "Jurídico/Minutas de Dilação de Prazo/Ofício 99 (15736628)")]
+    # os DOIS links vão para o Teams (pedido do usuário): o arquivo abre direto no Word
+    # para revisar; a pasta é onde ficam as versões ajustadas e o resto do caso.
+    assert pub.arquivo_url.endswith(".docx")
+    assert pub.pasta_url.endswith("Ofício 99 (15736628)")
+    assert not pub.pasta_url.endswith(".docx")
+
+
+def test_publicar_minuta_usa_o_mime_de_docx():
+    fake = _GraphCaminho()
+    biblioteca.publicar_minuta(fake, "Ofício 99", "1", "x.docx", b"PK", log=lambda *_: None)
+    assert fake.uploads[0][2] == biblioteca.DOCX_MIME
+
+
+def test_minuta_leva_o_oficio_e_os_anexos_para_a_mesma_pasta():
+    """A pasta é o dossiê do caso: quem revisa confere a minuta contra o ofício sem voltar
+    ao SEI (pedido do usuário, 18/08/2026)."""
+    fake = _GraphCaminho()
+    pub = biblioteca.publicar_minuta(
+        fake, "Ofício 99", "15736628", "Pedido.docx", b"PK-docx",
+        [("0-Ofício 99 (15736628).pdf", b"%PDF-of"), ("1-15716436_Planilha.pdf", b"%PDF-anx")],
+        log=lambda *_: None)
+
+    base = "Jurídico/Minutas de Dilação de Prazo/Ofício 99 (15736628)"
+    assert [c for c, _, _ in fake.uploads] == [
+        f"{base}/Pedido.docx",
+        f"{base}/0-Ofício 99 (15736628).pdf",
+        f"{base}/1-15716436_Planilha.pdf",
+    ]
+    assert pub.extras == 2
+    # o ofício e os anexos são PDF; só a minuta é docx
+    assert [mime for _, _, mime in fake.uploads] == [biblioteca.DOCX_MIME,
+                                                     biblioteca.PDF_MIME, biblioteca.PDF_MIME]
+
+
+def test_anexo_que_falha_nao_custa_a_minuta():
+    """A minuta sobe primeiro: um anexo grande demais (limite de ~4 MB do upload simples)
+    não pode deixar o Jurídico sem a peça na véspera do vencimento."""
+    class _QuebraNoSegundo(_GraphCaminho):
+        def upload_arquivo(self, drive_id, caminho, conteudo, mime="x"):
+            if caminho.endswith(".pdf"):
+                raise RuntimeError("413 payload too large")
+            return super().upload_arquivo(drive_id, caminho, conteudo, mime)
+
+    fake = _QuebraNoSegundo()
+    pub = biblioteca.publicar_minuta(fake, "Ofício 99", "1", "Pedido.docx", b"PK",
+                                     [("0-of.pdf", b"%PDF")], log=lambda *_: None)
+    assert pub.arquivo_url.endswith(".docx") and pub.extras == 0

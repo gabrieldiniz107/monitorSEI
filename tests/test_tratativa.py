@@ -289,3 +289,80 @@ def test_docs_da_intimacao_capturados_antes_da_ciencia_filtram_os_anexos(monkeyp
     nomes = [n for n, _ in enviados["anexos"]]
     assert any("Despacho" in n for n in nomes)
     assert not any("Consulta" in n or "Certid" in n for n in nomes)
+
+
+# --- Fase 5: dossiê guardado durante a tratativa ---
+def test_dossie_guarda_texto_e_protocolos_magros(tmp_path):
+    """Só `num → tipo`: as URLs da Lista de Protocolos levam `infra_hash`, que morre com a
+    sessão e não serviria para nada depois."""
+    from seibot.store import IntimacoesStore
+
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    i = _intim("15736628", "09153816000120")
+    store.marcar_tratado(i, "20/08/2026", prazo_dias=20)
+    protos = {"1": {"url": "http://sei/x?infra_hash=abc", "tipo": "Ofício 99"},
+              "2": {"url": "http://sei/y?infra_hash=abc",
+                    "tipo": "Certidão de Intimação Cumprida"}}
+    tratativa._guardar_dossie_best_effort(store, i, "texto", protos, True, lambda *_: None)
+
+    linha = store.linha_tratada(i.chave)
+    assert linha["oficio_texto"] == "texto"
+    assert "infra_hash" not in linha["protocolos_json"]
+    assert "Certidão de Intimação Cumprida" in linha["protocolos_json"]
+    assert linha["data_ciencia"]           # ciência dada nesta execução → carimba a data
+
+
+def test_dossie_nao_carimba_data_quando_a_ciencia_nao_foi_dada_agora(tmp_path):
+    """`--modo completo` roda em intimação já cumprida havia dias: carimbar 'hoje'
+    mentiria numa peça que alega tempestividade."""
+    from seibot.store import IntimacoesStore
+
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    i = _intim("15736628", "09153816000120")
+    store.marcar_tratado(i, "20/08/2026", prazo_dias=20)
+    tratativa._guardar_dossie_best_effort(store, i, "texto", {}, False, lambda *_: None)
+    assert store.linha_tratada(i.chave)["data_ciencia"] == ""
+
+
+def test_falha_ao_guardar_dossie_nao_derruba_a_tratativa():
+    """A ciência e o rascunho já aconteceram — insumo de uma peça futura nunca é crítico."""
+    class _StoreQuebra:
+        def guardar_dossie(self, *a, **kw):
+            raise RuntimeError("banco fora do ar")
+
+    avisos = []
+    tratativa._guardar_dossie_best_effort(_StoreQuebra(), _intim("1", "2"), "t", {}, True,
+                                          avisos.append)
+    assert avisos and "dossiê" in avisos[0]
+
+
+def test_arquivos_do_oficio_sao_guardados_para_a_pasta_da_minuta(tmp_path):
+    """Os MESMOS bytes que vão para o rascunho ficam em disco: o `prazos`, que monta a
+    minuta, não loga no SEI e não teria como rebaixá-los."""
+    from types import SimpleNamespace
+
+    from seibot import dossie
+
+    cfg = SimpleNamespace(seen_db_path=str(tmp_path / "t.db"))
+    g = agrupar_por_oficio([_intim("16126557", "49186533000107")])[0]
+    protos = {"16126557": {"tipo": "Ofício 884"}, "15716436": {"tipo": "Planilha"}}
+    tratativa._guardar_arquivos_best_effort(
+        cfg, g, b"%PDF-oficio", ["15716436"], protos,
+        [("Planilha_15716436.pdf", b"%PDF-anexo")], lambda *_: None)
+
+    lidos = dossie.carregar(cfg.seen_db_path, "16126557", log=lambda *_: None)
+    # o nome do ofício vem de `grupo.oficio_desc` (aqui o helper o deriva do doc_id)
+    assert [n for n, _ in lidos] == ["0-" + g.oficio_desc + " (16126557).pdf",
+                                     "1-15716436_Planilha.pdf"]
+    assert lidos[0][1] == b"%PDF-oficio" and lidos[1][1] == b"%PDF-anexo"
+
+
+def test_falha_ao_guardar_arquivos_nao_derruba_a_tratativa():
+    from types import SimpleNamespace
+
+    cfg = SimpleNamespace(seen_db_path=None)          # quebra dentro do helper
+    avisos = []
+    tratativa._guardar_arquivos_best_effort(
+        cfg, agrupar_por_oficio([_intim("1", "2")])[0], b"%PDF", [], {}, [],
+        avisos.append)
+    assert avisos           # avisou, mas não levantou

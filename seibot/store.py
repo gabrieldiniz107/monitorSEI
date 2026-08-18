@@ -83,6 +83,15 @@ class IntimacoesStore:
                 # item acionável do lembrete (é de lá que o cliente lê o ofício).
                 "grupo_tipo": "TEXT DEFAULT 'individual'",  # 'individual' | 'coletivo'
                 "pasta_url": "TEXT DEFAULT ''",
+                # Fase 5: dossiê do ofício, guardado durante a tratativa (quando o bot já
+                # está logado) para que a minuta de dilação possa ser montada depois sem
+                # voltar ao SEI — o comando `prazos` não faz login e não gasta 2FA.
+                "oficio_texto": "TEXT DEFAULT ''",
+                "protocolos_json": "TEXT DEFAULT ''",
+                "data_ciencia": "TEXT DEFAULT ''",   # 'DD/MM/AAAA'
+                "dilacao_estado": "TEXT DEFAULT ''",  # '' | 'gerada'
+                "dilacao_url": "TEXT DEFAULT ''",
+                "dilacao_em": "TEXT DEFAULT ''",     # 'AAAA-MM-DD'
             })
             con.commit()
 
@@ -183,6 +192,51 @@ class IntimacoesStore:
                  oficio_desc, intim.destinatario, grupo_tipo, pasta_url),
             )
             con.commit()
+
+    def guardar_dossie(self, chave: str, *, oficio_texto: str = "",
+                       protocolos_json: str = "", data_ciencia: str = "") -> None:
+        """Guarda o insumo da minuta de dilação (Fase 5) na linha já tratada.
+
+        ⚠️ Método separado de propósito: `marcar_tratado` só grava quando
+        `excluded.data_limite != ''` (guarda que protege o prazo do checkpoint, ver o
+        incidente de 05/08/2026). Passar o dossiê por lá o faria sumir em silêncio numa
+        tratativa cujo prazo ainda não foi capturado.
+
+        Só sobrescreve com valor não-vazio: regravar sem o texto não apaga o que já existe.
+        """
+        with closing(sqlite3.connect(self._path)) as con:
+            con.execute(
+                "UPDATE tratadas SET"
+                " oficio_texto = COALESCE(NULLIF(?,''), oficio_texto),"
+                " protocolos_json = COALESCE(NULLIF(?,''), protocolos_json),"
+                " data_ciencia = COALESCE(NULLIF(?,''), data_ciencia)"
+                " WHERE chave = ?",
+                (oficio_texto, protocolos_json, data_ciencia, chave),
+            )
+            con.commit()
+
+    def marcar_dilacao(self, chave: str, url: str, dia: str) -> None:
+        """Registra que a minuta de dilação já foi gerada — não repetir arquivo nem aviso."""
+        with closing(sqlite3.connect(self._path)) as con:
+            con.execute(
+                "UPDATE tratadas SET dilacao_estado = 'gerada', dilacao_url = ?,"
+                " dilacao_em = ? WHERE chave = ?",
+                (url, dia, chave))
+            con.commit()
+
+    def linha_tratada(self, chave: str) -> Optional[dict]:
+        """A linha inteira de `tratadas`, para montar a minuta fora do laço de prazos."""
+        with closing(sqlite3.connect(self._path)) as con:
+            con.row_factory = sqlite3.Row
+            r = con.execute("SELECT * FROM tratadas WHERE chave = ?", (chave,)).fetchone()
+            return dict(r) if r else None
+
+    def tratadas_por_doc(self, doc_id: str) -> list[dict]:
+        """Todas as linhas de um ofício (o coletivo tem uma por empresa). Para o comando manual."""
+        with closing(sqlite3.connect(self._path)) as con:
+            con.row_factory = sqlite3.Row
+            return [dict(r) for r in con.execute(
+                "SELECT * FROM tratadas WHERE doc_id = ? ORDER BY chave", (doc_id,))]
 
     def prazo_de(self, chave: str) -> Optional[tuple]:
         """(data_limite, prazo_dias, prazo_unidade) do que já foi tratado, ou None."""

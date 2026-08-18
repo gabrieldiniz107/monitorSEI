@@ -96,6 +96,40 @@ def texto_card_coletivo(grupo, link: str = "", hoje: Optional[date] = None) -> s
     return txt
 
 
+def texto_minuta_dilacao(linha: dict, arquivo_url: str = "", pasta_url: str = "",
+                         lacunas=(), dias: int = 0, hoje: Optional[date] = None,
+                         admite: Optional[bool] = None) -> str:
+    """Comentário que registra no card que a minuta de dilação foi gerada.
+
+    A mensagem do Teams se perde na rolagem; o card é o lugar onde o Jurídico volta a olhar
+    o caso. ⚠️ **Não** mexe em `StatusOficio`: sair de 'Aguardando documentação (cliente)'
+    encerraria o acompanhamento do prazo, e o pedido de dilação não suspende nada.
+    """
+    d = (hoje or date.today()).strftime("%d/%m/%Y")
+    quanto = f" requerendo {dias} dia(s)" if dias else ""
+    txt = (f"[Automação Jurídico] 🤖 Minuta de PEDIDO DE DILAÇÃO DE PRAZO gerada "
+           f"automaticamente em {d}{quanto}, porque este é o último aviso antes do "
+           f"vencimento ({linha.get('data_limite') or 'sem data'}).")
+    if admite is False:
+        txt += ("\n\n🛑 ATENÇÃO: não foi encontrada no ofício cláusula que autorize dilação "
+                "de prazo. Conferir se o pedido cabe neste caso — o remédio correto pode ser "
+                "outro (impugnação, recurso).")
+    elif admite is None:
+        txt += ("\n\nℹ️ O texto do ofício não estava guardado: a minuta saiu no modelo "
+                "padrão, sem leitura do caso.")
+    if lacunas:
+        txt += (f"\n\n⚠️ {len(lacunas)} lacuna(s) a preencher no documento (buscar por "
+                f"'[PREENCHER: …]'): " + ", ".join(lacunas) + ".")
+    if arquivo_url:
+        txt += f"\n\nMinuta: {arquivo_url}"
+    if pasta_url:
+        txt += f"\nPasta (com o ofício e os anexos para conferência): {pasta_url}"
+    txt += ("\n\nA automação NÃO peticiona no SEI: revisar, ajustar e protocolar. O pedido de "
+            "dilação não suspende nem interrompe o prazo original, então os avisos continuam "
+            "enquanto o card estiver em 'Aguardando documentação (cliente)'.")
+    return txt
+
+
 def texto_card(grupo, hoje: Optional[date] = None) -> str:
     """Comentário que marca o card como gerado pela automação (padrão do CREA/CFT)."""
     d = (hoje or date.today()).strftime("%d/%m/%Y")

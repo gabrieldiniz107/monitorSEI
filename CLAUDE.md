@@ -105,7 +105,9 @@ python -m seibot.monitor coletivo --modo mapear --doc-id 16075320    # READ-ONLY
 python -m seibot.monitor coletivo --modo completo --doc-id 16075320  # tudo, SEM ciencia (ja cumprido)
 python -m seibot.monitor coletivo --modo completo --doc-id 16075320,16075999  # varios na MESMA sessao
 python -m seibot.monitor coletivo --modo real [--doc-id N[,M]]       # DA CIENCIA e publica a pasta
-pytest -q                           # 231 testes (parser/classificar/store/notify/monitor/clientes/coletivo/…)
+python -m seibot.monitor dilacao --modo ensaio [--doc-id N]          # Fase 5: minuta em state/minutas/, sem publicar
+python -m seibot.monitor dilacao --modo gerar --doc-id N [--forcar]  # publica no SharePoint e avisa o Teams
+pytest -q                           # 294 testes (parser/classificar/store/notify/monitor/clientes/coletivo/minuta/…)
 ```
 
 Parser e classificador são **puros** (testáveis sem browser). A fixture real
@@ -768,3 +770,183 @@ time do Jurídico usa; as raias do board = o campo `StatusOficio`.
 - Faltam **ajustes de texto/tom do e-mail** ao cliente (template em `rascunho.py`).
 - Cliente Cabos Brasil Europa tem **só 1 e-mail** no SharePoint (`julia.castro@ella.link`) —
   conferir se o cadastro está completo.
+
+### Fase 5 — minuta de PEDIDO DE DILAÇÃO DE PRAZO (2026-08-18)
+
+No aviso de **"última chance"** (o gancho que a Fase 3 já reservava), o bot gera uma
+**minuta em Word** do pedido de dilação, publica numa **pasta interna do SharePoint** e manda
+o link ao grupo do Jurídico. **O bot não peticiona no SEI** — a entrega é uma peça para
+revisão humana; quem protocola é o Jurídico. Não existe (nem entra) código de peticionamento
+intercorrente.
+
+Estrutura copiada do template real do Jurídico (`BKUP_TELECOM_Pedido_Dilacao_Prazo_RI_II.pdf`):
+endereçamento → referência → qualificação → `I – DA TEMPESTIVIDADE` → `II – DA JUSTIFICATIVA`
+→ `III – DO PEDIDO` → fecho.
+
+**Decisões travadas com o usuário (18/08/2026):**
+
+| | |
+|---|---|
+| Destino | pasta **INTERNA**: Gestão Integrada → Documentos → `Jurídico/Minutas de Dilação de Prazo/<Ofício N (docid)>` |
+| Gatilho | `prazos.Decisao.ultima_chance` |
+| Insumo | texto do ofício guardado na tratativa; **sem ele, gera assim mesmo**, com lacunas |
+| Dias pedidos | o teto que o ofício admite (LLM); na falta, o **prazo original** |
+| Escopo | **só individual** (coletivo fica para depois) |
+| Fecho | cidade **do cliente** (cadastro) + assinante fixo no `.env` |
+| Kanban | **não mexe na raia**; a mensagem do Teams é o registro |
+
+⚠️ **Por que o card não é movido**: tirá-lo de `STATUS_AGUARDANDO` **encerraria o
+acompanhamento de prazo** (`monitor.acompanhar_prazos`) — mas o pedido de dilação **não
+suspende nem interrompe** o prazo original. Os lembretes têm de continuar.
+
+**Peças novas:**
+
+- **`seibot/dilacao.py`** — lê o ofício com o LLM em **JSON mode** e devolve `Analise`
+  (fundamento, teto de dias, órgão, norma, justificativa, cidade). `client` injetável, igual
+  ao `resumo.py`. `interpretar()` **nunca levanta**: resposta ruim vira análise vazia, porque
+  uma minuta com lacunas é entregável e uma exceção deixaria o Jurídico sem peça no último dia.
+- **`seibot/minuta.py`** — `montar()` **puro** (peça como `[(estilo, texto)]` + lista de
+  lacunas) e `para_docx()` com **python-docx** (dep nova). Todo dado ausente vira
+  **`[PREENCHER: …]`** — visível e pesquisável no Word.
+  ⚠️ **`_definir_idioma()` marca o documento como `pt-BR`.** O template embutido no
+  python-docx é `en-US`, então sem isso o Word marca **cada palavra em português** como erro
+  e a minuta chega ao Jurídico coberta de vermelho (reportado pelo usuário em 18/08). O
+  idioma é gravado no estilo `Normal` **e** no `docDefaults` — só o `Normal` deixaria a raiz
+  em inglês, e todo texto que não herdasse dele voltaria a ser corrigido em inglês. O teste
+  `test_docx_nasce_em_portugues_do_brasil` trava isso exigindo zero `en-US` no `styles.xml`.
+- **`store`**: colunas `oficio_texto`, `protocolos_json`, `data_ciencia`, `dilacao_estado`,
+  `dilacao_url`, `dilacao_em` (migração in-place) + `guardar_dossie` / `marcar_dilacao` /
+  `linha_tratada` / `tratadas_por_doc`.
+- **`tratativa._guardar_dossie_best_effort`** — captura texto do ofício + Lista de Protocolos
+  durante a tratativa, quando o bot **já está logado**. Assim o `prazos` continua sem tocar no
+  SEI (não gasta 2FA).
+- **`biblioteca.publicar_minuta`** + **`graph.garantir_caminho`** (cria a árvore nível a nível;
+  `garantir_pasta` só criava um). Devolve **`PublicacaoMinuta(arquivo_url, pasta_url, extras)`**
+  — a mensagem do Teams leva os **dois links** (pedido do usuário, 18/08): o arquivo abre
+  direto no Word para revisar, e a pasta mostra o conjunto.
+- **`seibot/dossie.py`** — a pasta da minuta é o **dossiê do caso**: leva o `.docx` **mais o
+  ofício e os anexos** (pedido do usuário, 18/08), para o Jurídico conferir a peça sem voltar
+  ao SEI. Como o `prazos` não faz login, os bytes são guardados em
+  **`state/dossies/<doc_id>/`** durante a tratativa (`tratativa._guardar_arquivos_best_effort`),
+  que é quando eles existem — antes iam para o rascunho de e-mail e eram descartados.
+  `state/` é volume, então sobrevive a rebuild. Nomes com prefixo `0-` (ofício) e `1-`, `2-`…
+  (anexos) para a pasta abrir na ordem de conferência.
+  ⚠️ **A minuta sobe primeiro e cada anexo é best-effort**: um arquivo acima do limite de
+  ~4 MB do upload simples do Graph não pode custar a peça na véspera do vencimento.
+- **`monitor.montar_minuta`** (cola testável) + `_minuta_best_effort` + comando `dilacao`.
+- **`comentarios.texto_minuta_dilacao`** + `monitor._comentar_minuta_no_card` — registra a
+  minuta no card do Kanban (links, lacunas, dias requeridos). A mensagem do Teams se perde na
+  rolagem; o card é onde o Jurídico volta a olhar o caso. Best-effort e **sem tocar em
+  `StatusOficio`** (sair da raia encerraria o acompanhamento do prazo).
+
+**Armadilhas que só apareceram no ensaio com ofício real (e viraram regressão):**
+
+- `"com fundamento no orientações constantes do Manual"` — o artigo depende do substantivo.
+  Agora **quem escolhe a contração é o modelo** (o prompt pede `"no item 5…"` / `"nas
+  orientações…"`), com `minuta.com_preposicao()` de rede: sem preposição nenhuma, entra `em`.
+- `"Ref.: Ofício 498 (SEI nº 15963368) (SEI nº 15843941)"` — o nº SEI só é acrescentado
+  quando a referência ainda não traz nenhum.
+- `"BELO HORIZONTE, 18 de agosto"` — o modelo às vezes ecoa o cadastro em caixa alta.
+  `cidade_formatada` passa a normalizar também a resposta do LLM, e **deixa intacto** o que já
+  tem minúscula (para não estragar "São Paulo").
+- `"e nas disposições do Lei nº 9.998"` — mesma concordância; e norma repetida dentro do
+  fundamento agora é omitida.
+
+**Onde ainda falta dado:**
+
+- ⚠️ **Só ofícios tratados a partir deste deploy têm dossiê.** Os que já estão em
+  acompanhamento geram minuta quase toda em lacunas (é o comportamento pedido) — vale avisar
+  o Jurídico de que as primeiras virão cruas. O mesmo vale para os **arquivos**: sem eles a
+  pasta sai só com o `.docx`.
+- ⚠️ **`data_ciencia` só é gravada quando o BOT deu a ciência.** No `--modo completo` (e em
+  toda intimação que alguém do Jurídico abriu no SEI antes do cron — o que o CLAUDE.md já
+  registra como comum) a ciência é de outro dia, e carimbar "hoje" mentiria numa peça que
+  alega tempestividade. Consequência medida no teste real de 18/08: a minuta do Ofício 884
+  saiu com **exatamente uma** lacuna, e era essa. A data está na *Certidão de Intimação
+  Cumprida* (cujo nº a peça já cita) e no tooltip "Cumprida em:" — extraí-la é a melhoria
+  mais óbvia daqui.
+- ⚠️ **`state/dossies/` cresce sem limpeza.** Cada tratativa individual guarda ofício +
+  anexos ali e nada os remove — nem quando a minuta é publicada, nem quando o caso encerra.
+  São poucos MB por ofício e ~12 tratativas em meses, então não é urgente; mas se o volume
+  incomodar, o gancho natural é apagar a pasta do `doc_id` quando o acompanhamento para
+  (`store.parar_acompanhamento`).
+- ⚠️ **Acento do município não é recuperável do cadastro** (guardado sem acento). A grafia
+  certa depende do LLM; o fallback só conserta a caixa.
+
+**Validação ao vivo nº 1 (2026-08-18)** — um login, ponta a ponta, sem tocar no banco de produção
+(cópia em scratch) e sem dar ciência: capturou o dossiê do **Ofício 884/2026/CPOE/SCP-ANATEL
+(16126557)**, Infinity Net, prazo real de 30 dias vencendo 16/09. O LLM acertou a unidade
+(Gerência de Acompanhamento Societário – CPOE), o nº completo do ofício, a Certidão de
+Intimação Cumprida (16138758) e as normas (RGO/Resolução 720/2020 e Resolução 682/2017).
+A minuta foi publicada em *Jurídico/Minutas de Dilação de Prazo/Ofício 884 (16126557)/* (a
+árvore foi criada sozinha), o grupo do Jurídico recebeu os links, e re-rodar o comando **não
+duplicou** (`dilacao_estado`).
+
+⚠️ **Apagar uma minuta publicada pode esbarrar em `HTTP 423 resourceLocked`**: assim que
+alguém abre o `.docx` pelo link do Teams, o Word Online trava o arquivo, e o lock sobrevive
+por bastante tempo à sessão. Não é erro do bot nem permissão faltando — é só esperar (ou
+fechar o arquivo em quem o abriu). Foi o que aconteceu ao remover a minuta de teste do
+Ofício 884.
+
+
+### Fase 5 — o que foi validado ao vivo, e o que ficou em aberto (2026-08-18)
+
+**Validação nº 2 — o fluxo completo, em produção**, no proc `53524.000048/2026-12` (Maxxnet,
+Notificação de Lançamento `16003331`), que estava em **última chance** (vencia em 19/08) com o
+card na raia certa. Rodou de ponta a ponta e cada etapa foi conferida depois:
+
+- minuta publicada em `Jurídico/Minutas de Dilação de Prazo/Ofício (16003331)/` (48 KB, e o
+  arquivo baixado de volta confirma `pt-BR`, sem `en-US`);
+- **comentário no card** — primeira execução ao vivo de `_comentar_minuta_no_card`;
+- card **permaneceu** em "Aguardando documentação (cliente)" ⇒ o acompanhamento do prazo segue;
+- mensagem no grupo do Teams; `dilacao_estado='gerada'` no banco (não repete).
+
+⚠️ **Mas a minuta saiu no modelo padrão, com 7 lacunas e sem os arquivos do ofício** — porque
+o dossiê não pôde ser capturado. Ver o bloqueio abaixo.
+
+### ⚠️ BLOQUEIO EM ABERTO: só as 100 intimações mais recentes são alcançáveis
+
+A tela de Intimações entrega 100 por página, e **a paginação não funciona**. Consequência
+prática para a Fase 5: **ofício tratado antes desta fase não tem como ter o dossiê recuperado**
+— nem o texto (para o LLM) nem o ofício/anexos (para a pasta). A minuta desses casos sai no
+modelo padrão, com as lacunas marcadas, que é o comportamento pedido pelo usuário.
+
+O que se tentou em 18/08 (e o que se aprendeu):
+
+- **`page.content()` estourava "Unable to retrieve content because the page is navigating"**.
+  Daí nasceram **`intimacoes._esperar_tabela`** (espera `domcontentloaded` → `load` **antes**
+  de ler) e **`intimacoes.ler_html`** (retry). O `_avancar_pagina` passou a envolver o
+  postback em `expect_navigation`. Essas peças estão certas e ficam.
+- **Não eram a causa raiz.** Com elas, o erro só mudou de lugar: agora dá timeout esperando
+  `table[summary^='Intima']` ficar visível — ou seja, `infraAcaoPaginar('+',0,'Infra',null)`
+  **leva para uma página que não tem a tabela**. Suspeita principal: `infra_hash` (o token
+  anti-CSRF por sessão que este arquivo já registra como armadilha). Falta capturar o HTML de
+  onde a paginação aterrissa — não foi feito para não gastar mais um código 2FA da caixa do
+  Rodrigo (foram 5 num dia).
+- O **filtro por nº de processo existe** (`#txtNumeroProcesso`, com `txtDataInicio`/`txtDataFim`,
+  `selTipoIntimacao`, `selCumprimentoIntimacao` e `#selInfraPaginacaoSuperior`) e submetê-lo via
+  JS falhou pelo mesmo motivo. É um caminho a retomar.
+
+**Saída estrutural sugerida (não implementada):** guardar o **`id_acesso_externo`** em
+`tratadas` durante a tratativa. Ele é estável e identifica o acesso ao processo, então o bot
+abriria qualquer processo direto, sem depender de achá-lo numa listagem. Resolveria a dilação
+retroativa **e** qualquer re-tratativa de ofício antigo.
+
+⚠️ **Para ofício tratado a partir daqui isso não aparece**: o dossiê e os arquivos são gravados
+no ato da tratativa, e a pasta da minuta nasce completa. O buraco é só retroativo. **O usuário
+decidiu (18/08) deixar assim e conferir num caso novo.**
+
+### Correções vindas da primeira mensagem real no Teams (2026-08-18)
+
+- **"Empresa: —"** — linha antiga do backfill tem `empresa` NULL, mas o CNPJ resolve a razão
+  social no cadastro (o nome certo já aparecia até no nome do arquivo). `_minuta_best_effort`
+  passa a usar o valor que a minuta resolveu (`m.empresa`).
+- **"Buscar por [PREENCHER no documento"** — colchete aberto sem fechar. Virou
+  `[PREENCHER: …]`, no Teams e no comentário do card.
+- **`Analise.admite` era capturado e nunca usado.** Agora, se o modelo não achar cláusula que
+  autorize dilação (caso típico de Notificação de Lançamento tributária, cujo remédio é
+  impugnação), sai um **🛑** no Teams e no card; sem dossiê, sai um **ℹ️** dizendo que a peça
+  veio no modelo padrão. E `minuta.montar` passou a usar `ANALISE_VAZIA` como default — só o
+  sentinela carrega `vazia=True`, que é o que distingue "leu e não achou" de "não houve leitura".
+- ⚠️ **Nome da pasta sai "Ofício (16003331)"** quando `oficio_desc` é NULL (linhas do backfill).
+  Cosmético, não corrigido.

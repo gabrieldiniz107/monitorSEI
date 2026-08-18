@@ -159,3 +159,60 @@ def test_marcar_promessa_avisada_mantem_aberta(tmp_path):
     store.marcar_promessa_avisada(i.chave)
     (p,) = store.promessas_abertas()
     assert p["estado"] == PROMESSA_ABERTA and p["avisada"] == 1
+
+
+# --- Fase 5: dossiê do ofício (insumo da minuta de dilação) ---
+def test_guardar_dossie_sobrevive_a_guarda_do_upsert_de_marcar_tratado(tmp_path):
+    """`marcar_tratado` só grava com `data_limite != ''` (proteção do prazo, incidente de
+    05/08). Por isso o dossiê tem método próprio: passar por lá o faria sumir calado."""
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    i = _intim()
+    store.marcar_tratado(i, "")            # checkpoint da ciência: sem prazo ainda
+    store.guardar_dossie(i.chave, oficio_texto="texto do ofício",
+                         protocolos_json='{"1": "Certidão de Intimação Cumprida"}',
+                         data_ciencia="05/08/2026")
+    linha = store.linha_tratada(i.chave)
+    assert linha["oficio_texto"] == "texto do ofício"
+    assert linha["data_ciencia"] == "05/08/2026"
+    assert "Certidão" in linha["protocolos_json"]
+
+
+def test_guardar_dossie_vazio_nao_apaga_o_que_ja_existe(tmp_path):
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    i = _intim()
+    store.marcar_tratado(i, "")
+    store.guardar_dossie(i.chave, oficio_texto="original", data_ciencia="05/08/2026")
+    store.guardar_dossie(i.chave, oficio_texto="")     # regravação sem o texto
+    assert store.linha_tratada(i.chave)["oficio_texto"] == "original"
+
+
+def test_marcar_dilacao_registra_a_url_e_impede_repeticao(tmp_path):
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    i = _intim()
+    store.marcar_tratado(i, "20/08/2026", prazo_dias=20)
+    assert store.em_acompanhamento()[0]["dilacao_estado"] == ""
+    store.marcar_dilacao(i.chave, "https://sp/minuta.docx", "2026-08-18")
+    linha = store.em_acompanhamento()[0]
+    assert linha["dilacao_estado"] == "gerada"
+    assert linha["dilacao_url"] == "https://sp/minuta.docx"
+    assert linha["dilacao_em"] == "2026-08-18"
+
+
+def test_tratadas_por_doc_traz_todas_as_empresas_do_oficio(tmp_path):
+    store = IntimacoesStore(str(tmp_path / "t.db"))
+    for cnpj in ("111", "222"):
+        store.marcar_tratado(_intim(cnpj), "20/08/2026", prazo_dias=20)
+    assert len(store.tratadas_por_doc("10")) == 2
+    assert store.tratadas_por_doc("99") == []
+
+
+def test_colunas_da_fase_5_sao_migradas_num_banco_antigo(tmp_path):
+    """O banco de produção é volume — a migração tem de ser in-place por ALTER TABLE."""
+    caminho = str(tmp_path / "antigo.db")
+    with sqlite3.connect(caminho) as con:
+        con.execute("CREATE TABLE tratadas (chave TEXT PRIMARY KEY, processo TEXT,"
+                    " doc_id TEXT, cnpj TEXT, data_limite TEXT, tratado_em TEXT)")
+        con.execute("INSERT INTO tratadas (chave, processo) VALUES ('k', 'P1')")
+    store = IntimacoesStore(caminho)       # __init__ migra
+    store.guardar_dossie("k", oficio_texto="ok")
+    assert store.linha_tratada("k")["oficio_texto"] == "ok"

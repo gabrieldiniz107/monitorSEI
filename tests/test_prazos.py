@@ -362,3 +362,188 @@ def test_linha_antiga_sem_empresa_nao_mostra_none():
     msg = prazos.formatar_sem_card({"processo": "P", "doc_id": "1", "empresa": None,
                                     "data_limite": "20/08/2026"})
     assert "None" not in msg and "Empresa:</b> —" in msg
+
+
+# ---------------------------------------------------------------------------
+# Fase 5 — gatilho da minuta de dilação na "última chance"
+# ---------------------------------------------------------------------------
+def _gerador(chamadas, url="https://sp/minuta.docx"):
+    def gerar(linha, chaves):
+        chamadas.append((linha["processo"], list(chaves)))
+        return url
+    return gerar
+
+
+def test_minuta_e_gerada_na_ultima_chance(tmp_path):
+    """É o momento projetado: depois do vencimento não há mais dilação a pedir."""
+    store = _store_com_prazo(tmp_path)
+    chamadas, enviadas = [], []
+    r = monitor.acompanhar_prazos(store=store, cards=_cards(STATUS_AGUARDANDO),
+                                  hoje=date(2026, 8, 14),   # última chance
+                                  enviar=enviadas.append, gerar_minuta=_gerador(chamadas),
+                                  log=lambda *a: None)
+    assert r["minutas"] == 1 and len(chamadas) == 1
+    assert "ÚLTIMA" in enviadas[0]
+
+
+def test_aviso_comum_nao_gera_minuta(tmp_path):
+    store = _store_com_prazo(tmp_path, data_limite="20/08/2026", prazo_dias=20)
+    chamadas, enviadas = [], []
+    r = monitor.acompanhar_prazos(store=store, cards=_cards(STATUS_AGUARDANDO),
+                                  hoje=date(2026, 8, 4),   # faltam 16: checkpoint comum
+                                  enviar=enviadas.append, gerar_minuta=_gerador(chamadas),
+                                  log=lambda *a: None)
+    assert r["avisos"] == 1 and r["minutas"] == 0 and chamadas == []
+
+
+def test_coletivo_nao_gera_minuta(tmp_path):
+    """A peça qualifica UMA requerente; o coletivo tem N empresas (decisão de 18/08/2026)."""
+    store = _store_coletivo(tmp_path, data_limite="19/08/2026", prazo_dias=5)
+    chamadas = []
+    monitor.acompanhar_prazos(store=store, cards=_cards_col(STATUS_AGUARDANDO),
+                              hoje=date(2026, 8, 18),   # última chance do coletivo
+                              enviar=lambda *_: None, gerar_minuta=_gerador(chamadas),
+                              log=lambda *a: None)
+    assert chamadas == []
+
+
+def test_minuta_ja_gerada_nao_se_repete(tmp_path):
+    store = _store_com_prazo(tmp_path)
+    for linha in store.em_acompanhamento():
+        store.marcar_dilacao(linha["chave"], "https://sp/x.docx", "2026-08-13")
+    chamadas = []
+    r = monitor.acompanhar_prazos(store=store, cards=_cards(STATUS_AGUARDANDO),
+                                  hoje=date(2026, 8, 14), enviar=lambda *_: None,
+                                  gerar_minuta=_gerador(chamadas), log=lambda *a: None)
+    assert r["avisos"] == 1 and r["minutas"] == 0 and chamadas == []
+
+
+def test_falha_na_minuta_nao_derruba_o_aviso_de_prazo(tmp_path):
+    """O lembrete de última chance é o que não pode faltar; a minuta é um extra."""
+    store = _store_com_prazo(tmp_path)
+    enviadas = []
+
+    def gerar_que_quebra(linha, chaves):
+        raise RuntimeError("SharePoint fora do ar")
+
+    try:
+        r = monitor.acompanhar_prazos(store=store, cards=_cards(STATUS_AGUARDANDO),
+                                      hoje=date(2026, 8, 14), enviar=enviadas.append,
+                                      gerar_minuta=gerar_que_quebra, log=lambda *a: None)
+    except RuntimeError:
+        raise AssertionError("a falha da minuta não pode escapar do acompanhamento")
+    assert r["avisos"] == 1 and "ÚLTIMA" in enviadas[0]
+
+
+def test_sem_gerador_o_acompanhamento_segue_igual(tmp_path):
+    """DILACAO_AUTO=false: nada muda no comportamento da Fase 3."""
+    store = _store_com_prazo(tmp_path)
+    enviadas = []
+    r = monitor.acompanhar_prazos(store=store, cards=_cards(STATUS_AGUARDANDO),
+                                  hoje=date(2026, 8, 14), enviar=enviadas.append,
+                                  log=lambda *a: None)
+    assert r["avisos"] == 1 and r["minutas"] == 0 and len(enviadas) == 1
+
+
+def test_mensagem_da_minuta_leva_o_link_do_ARQUIVO_e_o_da_PASTA():
+    """Pedido do usuário (18/08/2026): o arquivo abre direto no Word para revisar; a pasta
+    é onde ficam as versões ajustadas e o resto do caso."""
+    from seibot import minuta as minuta_mod
+    from seibot.dilacao import Analise
+
+    linha = {"processo": PROC, "doc_id": DOC, "oficio_desc": "Ofício 884",
+             "empresa": "Infinity Net Provedor de Internet Ltda",
+             "data_limite": "16/09/2026", "prazo_unidade": "dias"}
+    m = minuta_mod.montar({"processo": PROC, "empresa": "Infinity Net", "prazo_dias": 30},
+                          Analise(dias=30))
+    # o '&' dos links do SharePoint não pode ser escapado, senão o link quebra
+    msg = prazos.formatar_minuta_dilacao(
+        linha, "https://sp/_layouts/15/Doc.aspx?sourcedoc=%7B7AE0%7D&file=x.docx", m,
+        "https://sp/Documentos/Jurídico/Minutas?a=1&b=2")
+
+    assert '<a href="https://sp/_layouts/15/Doc.aspx?sourcedoc=%7B7AE0%7D&file=x.docx">' in msg
+    assert '<a href="https://sp/Documentos/Jurídico/Minutas?a=1&b=2">' in msg
+    assert "Abrir a minuta (Word)" in msg and "Abrir a pasta da minuta" in msg
+    assert "Dilação requerida:</b> 30 dias" in msg
+    assert "peticiona" in msg   # o texto tem <b>não</b> peticiona
+
+
+def test_mensagem_da_minuta_sem_pasta_nao_mostra_link_vazio():
+    from seibot import minuta as minuta_mod
+    from seibot.dilacao import Analise
+
+    m = minuta_mod.montar({"processo": PROC, "prazo_dias": 30}, Analise(dias=30))
+    msg = prazos.formatar_minuta_dilacao({"processo": PROC, "doc_id": DOC}, "https://sp/x.docx", m)
+    assert "Abrir a pasta" not in msg and "Abrir a minuta (Word)" in msg
+
+
+def test_mensagem_diz_que_o_oficio_e_os_anexos_estao_na_pasta():
+    """Pedido do usuário: a pasta é o dossiê do caso, para conferir sem voltar ao SEI."""
+    from seibot import minuta as minuta_mod
+    from seibot.dilacao import Analise
+
+    m = minuta_mod.montar({"processo": PROC, "prazo_dias": 30}, Analise(dias=30))
+    linha = {"processo": PROC, "doc_id": DOC, "data_limite": "16/09/2026"}
+
+    msg = prazos.formatar_minuta_dilacao(linha, "https://sp/x.docx", m, "https://sp/pasta", 3)
+    assert "com o ofício e 2 anexo(s) para conferência" in msg
+
+    so_oficio = prazos.formatar_minuta_dilacao(linha, "https://sp/x.docx", m,
+                                               "https://sp/pasta", 1)
+    assert "com o ofício para conferência" in so_oficio
+
+    # tratativa antiga, sem arquivos guardados: nada de "com o ofício"
+    sem = prazos.formatar_minuta_dilacao(linha, "https://sp/x.docx", m, "https://sp/pasta", 0)
+    assert "conferência" not in sem and "Abrir a pasta da minuta" in sem
+
+
+def test_mensagem_alerta_quando_o_oficio_nao_admite_dilacao():
+    """Protocolar dilação onde ela não cabe é pedir indeferimento — quem revisa tem de
+    ser avisado. (Caso real: Notificação de Lançamento tributária.)"""
+    from seibot import minuta as minuta_mod
+    from seibot.dilacao import Analise
+
+    linha = {"processo": PROC, "doc_id": DOC, "data_limite": "19/08/2026"}
+    nao = minuta_mod.montar({"processo": PROC, "prazo_dias": 20},
+                            Analise(dias=20, admite=False))
+    msg = prazos.formatar_minuta_dilacao(linha, "https://sp/x.docx", nao, "https://sp/p", 1)
+    assert "🛑" in msg and "cláusula que autorize" in msg
+
+    sim = minuta_mod.montar({"processo": PROC, "prazo_dias": 20},
+                            Analise(dias=20, admite=True))
+    assert "🛑" not in prazos.formatar_minuta_dilacao(linha, "u", sim, "p", 1)
+
+    # sem dossiê: avisa que a peça saiu no modelo padrão, sem leitura do caso
+    sem = minuta_mod.montar({"processo": PROC, "prazo_dias": 20})
+    assert "modelo padrão" in prazos.formatar_minuta_dilacao(linha, "u", sem, "p", 0)
+
+
+def test_mensagem_usa_a_razao_social_resolvida_quando_a_coluna_esta_vazia(tmp_path):
+    """Linha antiga do backfill tem `empresa` NULL, mas o CNPJ resolve o nome no cadastro.
+    Saía 'Empresa: —' no Teams com o nome certo dentro do próprio arquivo (18/08/2026)."""
+    from seibot import monitor
+    from seibot.clientes import ClienteInfo
+    from seibot.config import Config
+    from seibot.store import IntimacoesStore
+
+    class _Clientes:
+        graph = None
+        def info(self, cnpj):
+            return ClienteInfo(cnpj=cnpj, em_base=True, razao="MAXXNET TELECOMUNICACOES LTDA")
+
+    store = _store_com_prazo(tmp_path)
+    linha = dict(store.em_acompanhamento()[0], empresa=None, oficio_texto="")
+    m = monitor.montar_minuta(Config(), _Clientes(), linha, log=lambda *_: None)
+    assert m.empresa == "MAXXNET TELECOMUNICACOES LTDA"
+
+    msg = prazos.formatar_minuta_dilacao({**linha, "empresa": linha.get("empresa") or m.empresa},
+                                         "https://sp/x.docx", m, "https://sp/p")
+    assert "MAXXNET TELECOMUNICACOES LTDA" in msg and "Empresa:</b> —" not in msg
+
+
+def test_instrucao_de_busca_tem_o_colchete_fechado():
+    from seibot import minuta as minuta_mod
+
+    m = minuta_mod.montar({"processo": PROC})          # sem dossiê ⇒ tem lacunas
+    msg = prazos.formatar_minuta_dilacao({"processo": PROC}, "u", m)
+    assert "[PREENCHER: …]" in msg

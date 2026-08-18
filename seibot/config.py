@@ -80,6 +80,15 @@ class Config:
     # ciência sozinho. Desligado por padrão — ciência é irreversível.
     tratar_auto: bool = _bool("TRATAR_AUTO", False)
 
+    # --- Fase 5: minuta de pedido de dilação de prazo ---
+    # Arma a geração automática dentro do `prazos`. Desligado por padrão para permitir subir
+    # o código e conferir a primeira minuta à mão (`monitor dilacao`) antes de ligar.
+    dilacao_auto: bool = _bool("DILACAO_AUTO", False)
+    dilacao_assinante: str = os.getenv("DILACAO_ASSINANTE", "").strip()
+    dilacao_assinante_cargo: str = os.getenv("DILACAO_ASSINANTE_CARGO", "Procurador").strip()
+    # usada só quando o cadastro do cliente não tem município
+    dilacao_cidade_padrao: str = os.getenv("DILACAO_CIDADE_PADRAO", "").strip()
+
     def validate(self) -> None:
         faltando = [
             nome

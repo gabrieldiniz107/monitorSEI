@@ -218,23 +218,167 @@ def _cmd_prazos(cfg: Config, hoje: date | None = None) -> dict:
                 "erro": "SharePoint indisponível — sem o Kanban não dá para saber a raia."}
 
     from .teams import enviar_teams_webhook as _envia
-    return acompanhar_prazos(
-        store=store, cards=_indexar_cards(g), hoje=hoje,
-        enviar=lambda msg: _envia(cfg.teams_webhook_url, msg, cfg.teams_webhook_style))
+    envia = lambda msg: _envia(cfg.teams_webhook_url, msg, cfg.teams_webhook_style)  # noqa: E731
+
+    def gerar(linha, chaves):
+        return _minuta_best_effort(cfg, store, clientes, linha, chaves, hoje=hoje,
+                                   enviar=envia)
+
+    if not cfg.dilacao_auto:
+        gerar = None
+        print("  (DILACAO_AUTO=false — minuta de dilação não será gerada)")
+
+    return acompanhar_prazos(store=store, cards=_indexar_cards(g), hoje=hoje,
+                             enviar=envia, gerar_minuta=gerar)
+
+
+def montar_minuta(cfg: Config, clientes, linha: dict, *, hoje: date | None = None,
+                  client_llm=None, log=print):
+    """Linha de `tratadas` (+ cadastro do cliente) → `Minuta`. Sem I/O de escrita.
+
+    Separado do resto para que o `--modo ensaio` possa gerar e conferir o documento sem
+    publicar nada nem avisar ninguém.
+    """
+    import json
+
+    from . import dilacao as dilacao_mod
+    from . import minuta as minuta_mod
+
+    protocolos = {}
+    if linha.get("protocolos_json"):
+        try:
+            protocolos = json.loads(linha["protocolos_json"])
+        except (ValueError, TypeError):
+            log("   ⚠️ protocolos_json ilegível — seguindo sem a Certidão de Intimação")
+
+    info = clientes.info(linha.get("cnpj") or "") if clientes else None
+    empresa = (linha.get("empresa") or "").strip() or (info.razao if info else "")
+    prazo_texto = ""
+    if linha.get("prazo_dias"):
+        prazo_texto = (f"{linha['prazo_dias']} {linha.get('prazo_unidade') or 'dias'}, "
+                       f"vencendo em {linha.get('data_limite') or '?'}")
+
+    analise = dilacao_mod.analisar(
+        linha.get("oficio_texto") or "", cfg, client=client_llm,
+        contexto={
+            "processo": linha.get("processo"),
+            "oficio_desc": linha.get("oficio_desc"),
+            "empresa": empresa,
+            "cidade_cadastro": info.praca if info else "",
+            "prazo_texto": prazo_texto,
+            "protocolos_texto": "; ".join(f"{n}: {t}" for n, t in protocolos.items()) or None,
+        })
+    if analise.vazia:
+        log("   ⚠️ sem leitura útil do ofício (texto não guardado ou resposta vazia do "
+            "modelo) — a minuta sairá com as lacunas marcadas")
+
+    dados = {
+        "processo": linha.get("processo"),
+        "oficio_desc": linha.get("oficio_desc"),
+        "doc_id": linha.get("doc_id"),
+        "empresa": empresa,
+        "cnpj": linha.get("cnpj"),
+        "data_ciencia": linha.get("data_ciencia"),
+        "data_limite": linha.get("data_limite"),
+        "prazo_dias": linha.get("prazo_dias"),
+        "prazo_unidade": linha.get("prazo_unidade"),
+        "protocolos": protocolos,
+        "cidade_cadastro": info.municipio if info else "",
+        "cidade_padrao": cfg.dilacao_cidade_padrao,
+        "assinante": cfg.dilacao_assinante,
+        "assinante_cargo": cfg.dilacao_assinante_cargo,
+    }
+    return minuta_mod.montar(dados, analise, hoje=hoje or date.today())
+
+
+def _comentar_minuta_no_card(cfg: Config, g, linha: dict, m, pub, hoje: date, log) -> None:
+    """Registra a minuta no card do Kanban, como comentário de proveniência.
+
+    A mensagem do Teams se perde na rolagem; o card é onde o Jurídico volta a olhar o caso.
+    ⚠️ **Não** toca em `StatusOficio` — tirar o card de 'Aguardando documentação (cliente)'
+    encerraria o acompanhamento do prazo, e o pedido de dilação não suspende nada.
+
+    Cosmético e best-effort, como o comentário da criação do card: se o login delegado
+    (`state/.graph_token.json`) tiver expirado, só loga.
+    """
+    from . import comentarios, oficio_card
+
+    try:
+        card = g.buscar_item(oficio_card.LISTA_CONTROLE_OFICIO, linha.get("processo") or "")
+        if card is None:
+            log("   (sem card no Controle de Ofício — minuta não comentada)")
+            return
+        comentarios.postar_comentario(
+            cfg, oficio_card.LISTA_CONTROLE_OFICIO, card.get("id"),
+            comentarios.texto_minuta_dilacao(linha, pub.arquivo_url, pub.pasta_url,
+                                             m.lacunas, m.dias_pedidos, hoje,
+                                             admite=m.admite_dilacao))
+        log("   ✓ minuta registrada no card (comentário)")
+    except Exception as e:  # noqa: BLE001 — proveniência; a minuta já está publicada
+        log(f"   ⚠️ minuta publicada, mas falhou o comentário no card: {e}")
+
+
+def _minuta_best_effort(cfg: Config, store: IntimacoesStore, clientes, linha: dict,
+                        chaves: list, *, hoje: date, enviar, log=print) -> str:
+    """Gera, publica e anuncia a minuta de dilação. Devolve a URL (ou "").
+
+    **Best-effort**: falhar aqui não pode derrubar o acompanhamento dos demais prazos — o
+    lembrete de última chance já saiu, que é o que não pode faltar. A falha vira alerta no
+    canal técnico (não-crítico) e o Jurídico redige à mão, como sempre fez.
+    """
+    from . import biblioteca, dossie, minuta as minuta_mod, prazos
+
+    try:
+        g = getattr(clientes, "graph", None)
+        if g is None:
+            raise RuntimeError("SharePoint indisponível — sem onde publicar a minuta")
+        m = montar_minuta(cfg, clientes, linha, hoje=hoje, log=log)
+        # linhas antigas (do backfill) têm `empresa` NULL, mas o CNPJ resolve a razão social
+        # no cadastro — e era isso que saía como "Empresa: —" no Teams, com o nome certo
+        # dentro do próprio arquivo. Usa o que a minuta já resolveu.
+        linha = {**linha, "empresa": (linha.get("empresa") or m.empresa)}
+        docx = minuta_mod.para_docx(m)
+        # ofício + anexos guardados na tratativa: a pasta é o dossiê do caso, para o
+        # Jurídico conferir a minuta sem voltar ao SEI
+        extras = dossie.carregar(cfg.seen_db_path, linha.get("doc_id") or "", log=log)
+        pub = biblioteca.publicar_minuta(
+            g, linha.get("oficio_desc") or "Ofício", linha.get("doc_id") or "",
+            minuta_mod.nome_arquivo(m, linha.get("doc_id") or ""), docx, extras, log=log)
+        enviar(prazos.formatar_minuta_dilacao(linha, pub.arquivo_url, m, pub.pasta_url,
+                                              pub.extras))
+        for chave in chaves:
+            store.marcar_dilacao(chave, pub.arquivo_url, hoje.isoformat())
+        _comentar_minuta_no_card(cfg, g, linha, m, pub, hoje, log)
+        log(f"  📄 minuta de dilação: {linha['processo']} ({len(m.lacunas)} lacuna(s), "
+            f"{pub.extras} arquivo(s) do ofício junto)")
+        return pub.arquivo_url
+    except Exception as e:  # noqa: BLE001 — o aviso de prazo já saiu; isto é um extra
+        log(f"  ⚠️ falha ao gerar a minuta de dilação de {linha.get('processo')}: {e}")
+        from .erros import notificar_erro
+        notificar_erro(cfg, f"minuta de dilação · {linha.get('processo')}", e,
+                       detalhe=(f"<b>Ofício:</b> {linha.get('oficio_desc')} "
+                                f"({linha.get('doc_id')})<br>"
+                                "O aviso de prazo saiu normalmente; só a minuta falhou — "
+                                "o Jurídico segue podendo redigir à mão."))
+        return ""
 
 
 def acompanhar_prazos(*, store: IntimacoesStore, cards: dict, hoje: date,
-                      enviar, log=print) -> dict:
+                      enviar, gerar_minuta=None, log=print) -> dict:
     """Núcleo do acompanhamento, com dependências injetadas (mesmo padrão do `executar`).
 
     ⚠️ Consulta a raia do Kanban **antes** de qualquer aviso — exigência do usuário: se o
     card saiu de 'Aguardando documentação (cliente)', a mensagem que sai é a de PARADA da
     contagem, nunca mais um lembrete de prazo.
+
+    `gerar_minuta(linha, chaves)` (Fase 5) é chamado no aviso de **última chance** de um
+    ofício individual. Injetado, e não importado aqui, para o núcleo continuar testável sem
+    SharePoint nem LLM — e porque a geração é opcional (trava `DILACAO_AUTO`).
     """
     from . import prazos
 
     unidades = _unidades_de_aviso(store.em_acompanhamento())
-    avisos = paradas = sem_card = 0
+    avisos = paradas = sem_card = minutas = 0
     for linha, chaves in unidades:
         card = cards.get((linha["processo"], linha["doc_id"])) or cards.get((linha["processo"], ""))
         if card is None:
@@ -262,8 +406,22 @@ def acompanhar_prazos(*, store: IntimacoesStore, cards: dict, hoje: date,
             store.marcar_aviso_prazo(chave, hoje.isoformat())
         avisos += 1
 
+        # Fase 5: última chance é o momento projetado para a minuta de dilação — depois do
+        # vencimento não há mais o que pedir. Só individual (a peça qualifica UMA requerente)
+        # e só uma vez por ofício (`dilacao_estado`).
+        if (gerar_minuta is not None and d.ultima_chance and not prazos.eh_coletivo(linha)
+                and not (linha.get("dilacao_estado") or "")):
+            # blindado aqui também, e não só dentro do gerador: o aviso de prazo deste
+            # ofício JÁ saiu, e uma exceção aqui abortaria o laço, deixando os prazos
+            # seguintes sem lembrete nenhum. A minuta é um extra; o lembrete não é.
+            try:
+                if gerar_minuta(linha, chaves):
+                    minutas += 1
+            except Exception as e:  # noqa: BLE001
+                log(f"  ⚠️ minuta de dilação falhou em {linha.get('processo')}: {e}")
+
     return {"status": "ok", "acompanhando": len(unidades), "avisos": avisos,
-            "paradas": paradas, "sem_card": sem_card}
+            "paradas": paradas, "sem_card": sem_card, "minutas": minutas}
 
 
 def _unidades_de_aviso(linhas: list) -> list:
@@ -574,6 +732,81 @@ def _cmd_tratar(cfg: Config, modo: str = "ensaio", processo_alvo: str | None = N
     return {"status": "erro", "erro": f"modo inválido: {modo}"}
 
 
+def _cmd_dilacao(cfg: Config, modo: str = "ensaio", doc_id_alvo: str | None = None,
+                 forcar: bool = False) -> dict:
+    """Fase 5 — minuta de pedido de dilação, à mão. NÃO acessa o SEI.
+
+    - `ensaio` (default): monta a minuta e **grava em `state/minutas/`**, sem publicar no
+      SharePoint nem avisar o Teams. É como se confere o texto sem poluir nada.
+    - `gerar`: pipeline completo (publica + avisa + marca), para ofícios antigos ou para
+      regerar depois de ajustar o prompt.
+
+    Comando de operação: roda qualquer dia da semana, e não depende de `DILACAO_AUTO` (a
+    trava existe para o cron, não para quem está ao teclado).
+    """
+    import os
+
+    from . import minuta as minuta_mod
+
+    store = IntimacoesStore(cfg.seen_db_path)
+    clientes = clientes_mod.carregar_clientes()
+    if clientes is None:
+        return {"status": "erro", "erro": "SharePoint indisponível — sem cadastro do cliente."}
+
+    if doc_id_alvo:
+        linhas = [l for l in store.tratadas_por_doc(str(doc_id_alvo).strip())]
+    else:
+        linhas = [l for l in store.em_acompanhamento()
+                  if (l.get("grupo_tipo") or "individual") != "coletivo"]
+        if not forcar:
+            linhas = [l for l in linhas if not (l.get("dilacao_estado") or "")]
+    # a peça qualifica UMA requerente: coletivo fica de fora (decisão do usuário, 18/08/2026)
+    linhas = [l for l in linhas if (l.get("grupo_tipo") or "individual") != "coletivo"]
+    if not linhas:
+        return {"status": "ok", "modo": modo, "candidatos": 0,
+                "aviso": "nenhuma tratativa individual elegível"}
+
+    if modo == "ensaio":
+        destino = os.path.join(os.path.dirname(cfg.seen_db_path) or ".", "minutas")
+        os.makedirs(destino, exist_ok=True)
+        feitas = []
+        for linha in linhas:
+            m = montar_minuta(cfg, clientes, linha)
+            caminho = os.path.join(destino, minuta_mod.nome_arquivo(m, linha.get("doc_id") or ""))
+            with open(caminho, "wb") as fh:
+                fh.write(minuta_mod.para_docx(m))
+            print(f"  📄 {caminho} — {len(m.lacunas)} lacuna(s), "
+                  f"pedindo {m.dias_pedidos} dia(s)")
+            for lac in m.lacunas:
+                print(f"      • falta: {lac}")
+            feitas.append({"processo": linha.get("processo"), "arquivo": caminho,
+                           "lacunas": len(m.lacunas), "dias": m.dias_pedidos})
+        return {"status": "ok", "modo": "ensaio", "candidatos": len(linhas), "minutas": feitas}
+
+    if modo != "gerar":
+        return {"status": "erro",
+                "erro": f"modo inválido para 'dilacao': {modo} (use ensaio|gerar)"}
+
+    if not cfg.teams_webhook_url:
+        return {"status": "erro", "erro": "TEAMS_WEBHOOK_INTIMACOES_URL não configurado."}
+    from .teams import enviar_teams_webhook as _envia
+    envia = lambda msg: _envia(cfg.teams_webhook_url, msg, cfg.teams_webhook_style)  # noqa: E731
+
+    hoje = date.today()
+    feitas = falhas = 0
+    for linha in linhas:
+        if (linha.get("dilacao_estado") or "") and not forcar:
+            print(f"  • {linha.get('processo')}: minuta já gerada (--forcar para refazer)")
+            continue
+        if _minuta_best_effort(cfg, store, clientes, linha, [linha["chave"]],
+                               hoje=hoje, enviar=envia):
+            feitas += 1
+        else:
+            falhas += 1
+    return {"status": "ok" if falhas == 0 else "parcial", "modo": "gerar",
+            "candidatos": len(linhas), "minutas": feitas, "falhas": falhas}
+
+
 # comandos automáticos (rodam no cron). Todos param no fim de semana — decisão do usuário
 # em 2026-08-10: "a automação, no geral, roda só durante a semana". `tratar`/`coletivo` já
 # tinham a trava por causa da ciência; agora vale também para o `run` (notificação) e o
@@ -599,11 +832,15 @@ def _pular_fim_de_semana(comando: str, hoje: date | None = None) -> Optional[dic
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="seibot.monitor", description="Monitor de Intimações SEI")
     parser.add_argument("comando",
-                        choices=["run", "baseline", "dry-run", "tratar", "prazos", "coletivo"])
-    parser.add_argument("--modo", choices=["ensaio", "completo", "real", "mapear"],
+                        choices=["run", "baseline", "dry-run", "tratar", "prazos",
+                                 "coletivo", "dilacao"])
+    parser.add_argument("--modo", choices=["ensaio", "completo", "real", "mapear", "gerar"],
                         default="ensaio",
-                        help="modo do 'tratar'/'coletivo' (default: ensaio). "
-                             "'mapear' só existe no 'coletivo' e é read-only")
+                        help="modo do 'tratar'/'coletivo'/'dilacao' (default: ensaio). "
+                             "'mapear' só existe no 'coletivo' e é read-only; 'gerar' só "
+                             "existe no 'dilacao'")
+    parser.add_argument("--forcar", action="store_true",
+                        help="no 'dilacao', refaz a minuta mesmo se já houver uma gerada")
     parser.add_argument("--processo", default=None,
                         help="nº do processo (para 'tratar --modo completo')")
     parser.add_argument("--doc-id", dest="doc_id", default=None,
@@ -638,11 +875,13 @@ def main(argv=None) -> int:
             res = _cmd_coletivo(cfg, args.modo, args.doc_id)
         elif args.comando == "prazos":
             res = _cmd_prazos(cfg)
+        elif args.comando == "dilacao":
+            res = _cmd_dilacao(cfg, args.modo, args.doc_id, args.forcar)
         else:
             res = _cmd_dry_run(cfg)
     except Exception as e:  # noqa: BLE001 — inclusive erros não mapeados
         ctx = f"monitor {args.comando}"
-        if args.comando in ("tratar", "coletivo"):
+        if args.comando in ("tratar", "coletivo", "dilacao"):
             ctx += f" --modo {args.modo}"
         erros.notificar_erro(cfg, ctx, e)
         print(json.dumps({"status": "erro", "comando": args.comando,

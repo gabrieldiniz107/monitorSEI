@@ -80,6 +80,64 @@ def _comentar_automacao(cfg, card_id: str, grupo: Grupo, log) -> None:
         log(f"   ⚠️ card criado, mas falhou o comentário de automação: {e}")
 
 
+def _guardar_dossie_best_effort(store, intim: Intimacao, oficio_texto: str,
+                                protos: dict, ciencia_dada: bool, log) -> None:
+    """Guarda o insumo da minuta de dilação (Fase 5): texto do ofício + Lista de Protocolos.
+
+    Aqui é o único momento barato de capturar isso — o bot já está logado e com o texto em
+    mãos. O comando `prazos`, que gera a minuta, não faz login (não gasta 2FA do Rodrigo).
+
+    Da Lista de Protocolos sai o nº da **Certidão de Intimação Cumprida**, que a peça cita na
+    seção de tempestividade. Guarda-se só `num → tipo` (as URLs levam `infra_hash`, que morre
+    com a sessão e não serve para nada depois).
+
+    ⚠️ `data_ciencia` só é gravada quando a ciência foi dada **nesta execução**
+    (`--modo real`). No `--modo completo` a intimação já estava cumprida havia dias, e
+    carimbar "hoje" mentiria numa peça que alega tempestividade. Sem ela, a minuta sai com a
+    lacuna marcada — que é a informação honesta.
+
+    Best-effort: a ciência e o rascunho já aconteceram — falhar em guardar insumo de uma
+    minuta futura não pode derrubar a tratativa.
+    """
+    import json
+    from datetime import date
+
+    try:
+        magro = {num: p.get("tipo", "") for num, p in (protos or {}).items()}
+        store.guardar_dossie(intim.chave, oficio_texto=oficio_texto,
+                             protocolos_json=json.dumps(magro, ensure_ascii=False),
+                             data_ciencia=(date.today().strftime("%d/%m/%Y")
+                                           if ciencia_dada else ""))
+    except Exception as e:  # noqa: BLE001 — insumo de uma peça futura, nunca crítico
+        log(f"   ⚠️ falha ao guardar o dossiê do ofício (minuta de dilação): {e}")
+
+
+def _guardar_arquivos_best_effort(cfg, grupo: Grupo, of_pdf: bytes, anexos_nums: list,
+                                  protos: dict, anexos: list, log) -> None:
+    """Guarda ofício + anexos em `state/dossies/<doc_id>/`, para a pasta da minuta.
+
+    Os arquivos são renomeados aqui (e não reaproveitados de `_nome_arquivo`) porque na pasta
+    do SharePoint eles precisam **aparecer em ordem** para o Jurídico conferir: o ofício com
+    prefixo `0-`, os anexos numerados a partir de `1-`.
+
+    Best-effort: a ciência e o rascunho já aconteceram.
+    """
+    from . import dossie
+
+    try:
+        arquivos = [(dossie.nome_oficio(grupo.oficio_desc, grupo.doc_id), of_pdf)]
+        for ordem, num in enumerate(anexos_nums, start=1):
+            p = protos.get(num) or {}
+            # `anexos` já traz os bytes baixados, na mesma ordem de `anexos_nums`
+            conteudo = anexos[ordem - 1][1] if ordem - 1 < len(anexos) else None
+            if conteudo:
+                arquivos.append((dossie.nome_anexo(ordem, num, p.get("tipo", "")), conteudo))
+        n = dossie.guardar(cfg.seen_db_path, grupo.doc_id, arquivos, log=log)
+        log(f"   ✓ {n} arquivo(s) guardados para a pasta da minuta de dilação")
+    except Exception as e:  # noqa: BLE001 — insumo de uma peça futura, nunca crítico
+        log(f"   ⚠️ falha ao guardar os arquivos do ofício: {e}")
+
+
 def _criar_card_best_effort(cfg, clientes, grupo, intim, prazo, log) -> Optional[str]:
     """Cria o card do ofício no SharePoint. **Best-effort**: qualquer falha aqui NÃO derruba
     a tratativa (ciência + rascunho já concluídos) — só loga e avisa o responsável técnico.
@@ -161,7 +219,8 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
     try:
         return _tratar_apos_ciencia(sess, cfg, grupo, intim, clientes, store,
                                     criar_rascunho=criar_rascunho, url_teams=url_teams,
-                                    docs_intimacao=docs_intimacao, log=log)
+                                    docs_intimacao=docs_intimacao,
+                                    ciencia_dada=ciencia_dada, log=log)
     except Exception as e:
         if not ciencia_dada:
             raise
@@ -174,7 +233,8 @@ def tratar_um(sess, cfg, grupo: Grupo, clientes: Optional[BaseClientes], store, 
 def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
                          clientes: Optional[BaseClientes], store, *,
                          criar_rascunho: bool, url_teams: Optional[str],
-                         docs_intimacao: Optional[list] = None, log=print) -> dict:
+                         docs_intimacao: Optional[list] = None,
+                         ciencia_dada: bool = False, log=print) -> dict:
     """Da Lista de Protocolos até o rascunho. Separado para que qualquer falha aqui seja
     classificada como pós-ciência pelo `tratar_um`."""
     from . import processo, rascunho, resumo
@@ -251,6 +311,10 @@ def _tratar_apos_ciencia(sess, cfg, grupo: Grupo, intim: Intimacao,
                          prazo_dias=prazo.dias if prazo else None,
                          prazo_unidade=prazo.unidade if prazo else "",
                          oficio_desc=grupo.oficio_desc)
+    _guardar_dossie_best_effort(store, intim, oficio_texto, protos, ciencia_dada, log)
+    # os MESMOS bytes que foram para o rascunho também ficam em disco, para a pasta da minuta
+    # de dilação (o comando `prazos` não loga no SEI e não teria como rebaixá-los)
+    _guardar_arquivos_best_effort(cfg, grupo, of_pdf, anexos_nums, protos, anexos, log)
     return {"processo": grupo.processo, "empresa": intim.destinatario,
             "prazo": prazo.data_limite if prazo else None,
             "emails": emails, "anexos": len(anexos), "rascunho": criar_rascunho,

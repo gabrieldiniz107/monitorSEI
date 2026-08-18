@@ -156,6 +156,21 @@ class GraphSharePoint:
                 return item
             raise
 
+    def garantir_caminho(self, drive_id: str, caminho: str) -> dict:
+        """Garante a árvore inteira `a/b/c`, nível a nível, e devolve a pasta final.
+
+        `garantir_pasta` cria **um** nível e assume o pai existente — o que basta para a
+        Fase 4, cuja raiz já existia. A Fase 5 estreia uma árvore nova, então precisa criar
+        os níveis intermediários também.
+        """
+        pai, item = "", None
+        for nome in [n for n in caminho.strip("/").split("/") if n]:
+            item = self.garantir_pasta(drive_id, pai, nome)
+            pai = f"{pai}/{nome}" if pai else nome
+        if item is None:
+            raise GraphError(f"caminho vazio: {caminho!r}")
+        return item
+
     def upload_arquivo(self, drive_id: str, caminho: str, conteudo: bytes,
                        mime: str = "application/octet-stream") -> dict:
         """Sobe um arquivo (até ~4 MB) em `caminho`, relativo à raiz do drive.

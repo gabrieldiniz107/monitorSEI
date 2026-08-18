@@ -85,6 +85,18 @@ class ClienteInfo:
     telefones: tuple[str, ...] = ()
     sp_item_id: str = ""            # id do item na lista Clientes SCM (alvo do lookup CNPJ)
     pacote: str = ""               # tier do contrato ativo (Comercial.Servicos), p/ o card
+    # praça do cliente, para o fecho da minuta de dilação (Fase 5). ⚠️ O cadastro guarda em
+    # CAIXA ALTA e SEM ACENTO ("SAO PAULO") — quem conserta a grafia é `minuta.cidade_formatada`
+    # (caixa) e o LLM (acento).
+    municipio: str = ""
+    uf: str = ""
+
+    @property
+    def praca(self) -> str:
+        """'SAO PAULO, SP' como está no cadastro — vazio se não houver município."""
+        if not self.municipio:
+            return ""
+        return f"{self.municipio}, {self.uf}" if self.uf else self.municipio
 
     @property
     def ativo(self) -> bool:
@@ -147,6 +159,8 @@ class SharePointClientes:
                 emails=_emails_de(f),
                 telefones=_telefones_de(f),
                 sp_item_id=str(f.get("id") or ""),
+                municipio=(f.get("Municipio") or "").strip(),
+                uf=(f.get("field_5") or "").strip(),
             )
 
         # 2) Comercial: quem tem contrato "Ativo" (CNPJ é lookup p/ Clientes SCM) + o tier
