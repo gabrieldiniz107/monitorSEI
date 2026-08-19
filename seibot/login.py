@@ -79,7 +79,7 @@ def fazer_login(cfg: Config, log=print) -> "LoginSession":
             )
 
         log("→ Buscando o código 2FA no e-mail (IMAP)…")
-        codigo = esperar_codigo(cfg, apos=apos, timeout_s=120, intervalo_s=5)
+        codigo = esperar_codigo(cfg, apos=apos, timeout_s=120, intervalo_s=5, log=log)
         log(f"→ Código recebido: {codigo}")
 
         page.fill("input[placeholder='Código de Acesso']", codigo)

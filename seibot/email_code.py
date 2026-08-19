@@ -24,6 +24,11 @@ _MARKER = "codigo de acesso"
 _TOKEN_RE = re.compile(r"c[oó]digo\s+de\s+acesso[^\d]{0,20}(\d{4,8})", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
+# Sem isso, uma conexão IMAP que trava (rede/DNS instável) fica pendurada para
+# sempre — o timeout_s de esperar_codigo() nunca é alcançado porque ele conta
+# entre tentativas, não dentro de uma chamada bloqueada (incidente 2026-08-19).
+_IMAP_TIMEOUT_S = 20
+
 
 def _sem_acento(s: str) -> str:
     return "".join(
@@ -75,7 +80,7 @@ def _extrair_codigo(msg: Message) -> Optional[str]:
 def _buscar_uma_vez(cfg, apos: datetime) -> Optional[str]:
     """Retorna o código do e-mail do SEI mais recente recebido depois de `apos`."""
     since_date = (apos - timedelta(days=1)).strftime("%d-%b-%Y")  # SINCE = granularidade de dia
-    conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
+    conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=_IMAP_TIMEOUT_S)
     achados: list[tuple[datetime, str]] = []
     try:
         conn.login(cfg.imap_user, cfg.imap_app_password)
@@ -110,17 +115,25 @@ def _buscar_uma_vez(cfg, apos: datetime) -> Optional[str]:
     return achados[0][1]
 
 
-def esperar_codigo(cfg, apos: datetime, timeout_s: int = 120, intervalo_s: int = 5) -> str:
+def esperar_codigo(cfg, apos: datetime, timeout_s: int = 120, intervalo_s: int = 5, log=lambda *a: None) -> str:
     """Espera o código 2FA chegar (recebido depois de `apos`). Erro se estourar o timeout.
 
     `apos` deve ser o instante (UTC) imediatamente ANTERIOR ao clique de login, com uma
     pequena folga de tolerância de relógio já aplicada pelo chamador.
+
+    Falha de rede/IMAP numa tentativa (timeout, conexão recusada, etc.) não aborta na
+    hora — é tratada como "ainda não achou" e tenta de novo até estourar `timeout_s`,
+    já que agora cada tentativa individual tem seu próprio timeout (`_IMAP_TIMEOUT_S`).
     """
     limite = time.monotonic() + timeout_s
     tentativa = 0
     while time.monotonic() < limite:
         tentativa += 1
-        codigo = _buscar_uma_vez(cfg, apos)
+        try:
+            codigo = _buscar_uma_vez(cfg, apos)
+        except Exception as exc:
+            log(f"  (aviso IMAP tentativa {tentativa}: {exc})")
+            codigo = None
         if codigo:
             return codigo
         time.sleep(intervalo_s)
