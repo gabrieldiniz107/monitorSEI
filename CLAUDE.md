@@ -950,3 +950,34 @@ decidiu (18/08) deixar assim e conferir num caso novo.**
   sentinela carrega `vazia=True`, que é o que distingue "leu e não achou" de "não houve leitura".
 - ⚠️ **Nome da pasta sai "Ofício (16003331)"** quando `oficio_desc` é NULL (linhas do backfill).
   Cosmético, não corrigido.
+
+### Incidente: IMAP do 2FA travava sem timeout (2026-08-19)
+
+O container do cron das 17:10 (`tratar --modo real`) travou **indefinidamente** (0% CPU,
+sem progresso, sem erro, sem alerta) parado em `esperar_codigo` → `Buscando o código 2FA
+no e-mail (IMAP)…`. Causa: `imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)` em
+`seibot/email_code.py` não tinha `timeout=` — uma conexão que travasse (rede/DNS
+instável, ou a conta Gmail respondendo devagar sob throttling) bloqueava o socket para
+sempre. O `timeout_s=120` de `esperar_codigo()` **não protegia contra isso**: ele conta
+tempo *entre* tentativas, não dentro de uma chamada já bloqueada.
+
+Achado junto: um container **zumbi desde 2026-07-16** (`docker compose run` sem `--rm`
+efetivo, ou subido via `up` por engano) rodando **108% CPU por 5 semanas** sem ninguém
+notar — não era a causa deste incidente, mas mostra que nada aqui monitora containers
+órfãos. Morto manualmente; **causa raiz de como ele nasceu não foi investigada**.
+
+**Fix aplicado:** `_IMAP_TIMEOUT_S = 20` no `imaplib.IMAP4_SSL(...)`, e o laço de
+`esperar_codigo` passou a tratar exceção da tentativa como "ainda não achou" (log + segue
+tentando) em vez de deixar o processo pendurado. `login.py` passa `log=log` adiante.
+313 testes passando; imagem rebuilded na VPS.
+
+⚠️ **Residual não resolvido**: o fix evita o hang eterno, mas **não foi testado contra um
+hang real** desde o deploy (só testes unitários + runs normais). E a causa de fundo — a
+conta Gmail (`rodrigo.engo@gmail.com`) responder devagar sob volume alto de login IMAP
+(compartilhada com o `scm-watchers`, que loga 1x/min 24/7 — ver o CLAUDE.md daquele repo)
+— continua existindo, só ficou tolerável.
+
+**Pendente (decidido não fazer na VPS, fica para rodar localmente):** um check
+periódico simples pra flagrar container Docker órfão/zumbi (`docker ps` com uptime muito
+acima do esperado pra um serviço `restart: "no"`), pra não repetir os 5 semanas de
+108% CPU sem ninguém ver.
