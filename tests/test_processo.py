@@ -365,6 +365,34 @@ def test_urls_aceite_sobrevive_a_falha_do_lazy():
                                      "principal": False}]
 
 
+_RESPOSTA_URL = ("https://sei.anatel.gov.br/sei/controlador_externo.php?"
+                 "acao=md_pet_responder_intimacao_usu_ext&id_documento=18009400")
+
+
+def test_url_peticionar_resposta_usa_o_dom_quando_o_icone_ja_renderizou():
+    page = _PageAceites(f"window.location = '{_RESPOSTA_URL}'", [])
+    assert _p.url_peticionar_resposta(page) == _RESPOSTA_URL
+
+
+def test_url_peticionar_resposta_resolve_o_lazy_quando_o_dom_ainda_nao_carregou():
+    """Mesma classe de bug do 693, mas no ícone de RESPOSTA — nunca resolvida antes: o
+    coletivo tratava normalmente (ciência + pasta), mas ficava sem prazo e, por isso, sem
+    card (a criação do card do coletivo é condicionada a haver prazo)."""
+    page = _PageAceites("", [
+        {"html": f"<a onclick=\"window.location = '{_RESPOSTA_URL}'\">"
+                 "<img src='.../intimacao_peticionar_resposta.svg'></a>",
+         "num": "16075320"},
+    ])
+    assert _p.url_peticionar_resposta(page) == _RESPOSTA_URL
+
+
+def test_url_peticionar_resposta_none_quando_nao_ha_icone_em_lugar_nenhum():
+    """Intimação que não exige resposta (ex.: mero Conhecimento) — None é o valor certo,
+    não uma falha a ser resolvida pelo lazy."""
+    page = _PageAceites("", [])
+    assert _p.url_peticionar_resposta(page) is None
+
+
 def test_escolher_aceite_prefere_o_documento_do_oficio():
     """No 693 os 4 ícones vieram com principal=False — o casamento por doc_id é o que resta."""
     aceites = [{"url": "a", "num": "16075316", "principal": False},

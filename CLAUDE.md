@@ -617,6 +617,35 @@ Três consertos vieram junto:
   Antes o bot seguia como "ciência já dada", quebrava adiante em "ofício não achado na Lista
   de Protocolos" e a intimação ficava Pendente sem ninguém ter dado ciência.
 
+### O mesmo lazy-load também comia o prazo do coletivo, em silêncio (achado 2026-08-20)
+
+O fix de 07/08 acima cobriu o ícone de **aceite**. O ícone de **resposta** (onde mora o
+prazo, lido por `processo.url_peticionar_resposta` → `capturar_prazo`) ficou de fora — ele
+só lia `document.querySelectorAll('a')` no DOM já renderizado, sem o complemento do
+endpoint em lote. Card do coletivo é criado só **quando há prazo**
+(`coletivo._apos_ciencia`: `if prazo`), então todo coletivo cujo processo fosse grande
+o bastante para a coluna "Ações" não terminar de carregar a tempo tratava normalmente
+(ciência + pasta publicada + Teams avisado) mas **nunca ganhava card** — sem erro, sem log
+visível de falha, porque `prazo=None` é também o resultado legítimo de "não exige
+resposta" (mero Conhecimento). Os 7 coletivos de 07-08/08 (processos ainda pequenos)
+tiveram prazo capturado e card; depois de 10/08 os coletivos pararam de aparecer no board
+mesmo quando o ofício era do tipo que normalmente teria prazo — sintoma batendo com o
+`prazo` sumindo, não com a ausência real de prazo.
+
+**Fix:** `processo.url_peticionar_resposta` ganhou o mesmo fallback do `urls_aceite` —
+se o ícone não estiver no DOM, resolve pelo endpoint em lote (`_acoes_lazy_html`, extraído
+de dentro de `_aceites_lazy` para ser reaproveitado) e procura `intimacao_peticionar_resposta`
+no HTML devolvido. `_aceites_lazy` e o novo `_resposta_lazy` agora **compartilham** a mesma
+chamada de rede em vez de cada um bater no endpoint. Cobre individual e coletivo (o
+individual não dependia do prazo para ganhar card, mas também estava perdendo a data de
+vencimento em silêncio nos mesmos processos grandes). **318 testes.**
+
+⚠️ **Ainda não medido ao vivo** — o fix segue exatamente o padrão já validado do
+`_aceites_lazy`, mas não houve execução real desde a mudança. Produção roda **da imagem**:
+exige `docker compose build` na VPS antes do próximo cron para valer. Vale conferir os
+próximos coletivos tratados (`/var/log/sei-coletivo.log`) e o board do Kanban para
+confirmar que os cards voltaram a aparecer.
+
 ### Fase 3 — acompanhamento de prazos (feature 2026-08-05)
 
 Comando novo **`monitor prazos`**, 1x/dia às 08:30 no cron. **Não acessa o SEI**: lê a tabela

@@ -246,32 +246,59 @@ async ()=>{
 _MODAL_ACEITE_RE = re.compile(r"infraAbrirJanelaModal\('([^']*confirmar_aceite[^']*)'")
 
 
-def _aceites_lazy(page) -> list[dict]:
-    """Ícones de aceite que o lazy-load da coluna "Ações" ainda não renderizou.
+def _acoes_lazy_html(page) -> list[dict]:
+    """HTML bruto de cada célula "Ações" que o lazy-load ainda não renderizou.
 
     ⚠️ Por que isto existe (achado de 2026-08-07, ofício coletivo 693 / proc
     53500.101985/2026-62): a coluna "Ações" não vem no HTML — cada linha traz um
     `<div class="md-pet-acao-lazy">` e um loader que faz **um POST por documento, em
     cadeia** (`get_acoes_protocolo_lista`). Num processo com ~105 documentos a cadeia leva
     dezenas de segundos, e o `abrir_processo` (que espera ~11s) lia a página antes de os
-    ícones de aceite existirem ⇒ `urls_aceite` devolvia `[]` e o bot concluía "ciência já
-    dada", ficando sem por onde entrar. Rolar mais não resolve: o custo é de rede, não de
-    viewport.
+    ícones existirem ⇒ tanto `urls_aceite` (ícone de aceite) quanto `url_peticionar_resposta`
+    (ícone de prazo) voltavam vazios — o segundo caso é silencioso: o coletivo é tratado, mas
+    sem prazo capturado ele nunca ganha card (2026-08-20, cards de coletivo pararam de
+    aparecer no Kanban depois de 10/08 — processos com muitos destinatários/documentos nunca
+    terminam de carregar as Ações a tempo do `document.querySelectorAll('a')` de
+    `url_peticionar_resposta`, que só lia o DOM já renderizado). Rolar mais não resolve: o
+    custo é de rede, não de viewport.
 
-    Aqui chamamos o mesmo endpoint **em lote**, uma vez, e lemos o HTML dos botões. É o
-    mesmo GET/POST de leitura que o navegador faria — não confirma nada.
+    Chama o mesmo endpoint **em lote**, uma vez, e devolve o HTML de cada botão — quem
+    interpreta (aceite ou resposta) é o chamador. É o mesmo GET/POST de leitura que o
+    navegador faria — não confirma nada.
     """
     try:
         itens = page.evaluate(_JS_ACEITES_LAZY) or []
     except Exception:
         return []   # sem as ações do lazy seguimos com o que o DOM já mostrava
+    return itens
+
+
+def _aceites_lazy(page) -> list[dict]:
+    """Ícones de aceite que o lazy-load da coluna "Ações" ainda não renderizou."""
     achados = []
-    for it in itens:
+    for it in _acoes_lazy_html(page):
         m = _MODAL_ACEITE_RE.search(it.get("html") or "")
         if m:
             achados.append({"url": _html.unescape(m.group(1)), "num": it.get("num", ""),
                             "principal": "doc_principal" in it["html"]})
     return achados
+
+
+_RESPOSTA_ONCLICK_RE = re.compile(
+    r"window\.location\s*=\s*'([^']+)'|window\.open\('([^']+)'")
+
+
+def _resposta_lazy(page) -> Optional[str]:
+    """URL da página de resposta, para quando o ícone ainda não estava no DOM renderizado
+    (mesmo mecanismo lazy do `_aceites_lazy` — ver seu docstring)."""
+    for it in _acoes_lazy_html(page):
+        frag = it.get("html") or ""
+        if "intimacao_peticionar_resposta" not in frag:
+            continue
+        m = _RESPOSTA_ONCLICK_RE.search(frag)
+        if m:
+            return _html.unescape(m.group(1) or m.group(2))
+    return None
 
 
 def aceites_no_dom(page) -> list[dict]:
@@ -456,7 +483,13 @@ def baixar_como_pdf(page, context, url: str) -> bytes:
 
 def url_peticionar_resposta(page) -> Optional[str]:
     """URL da página de resposta (onde está o prazo), a partir do ícone azul da linha do
-    ofício. None se a intimação não exige resposta (ex.: mero Conhecimento)."""
+    ofício. None se a intimação não exige resposta (ex.: mero Conhecimento).
+
+    Lê o DOM e, se o ícone ainda não tiver sido renderizado (coluna "Ações" lazy — ver
+    `_acoes_lazy_html`), resolve pelo mesmo endpoint em lote que `urls_aceite` já usa. Sem
+    isso, processo grande (típico do coletivo) fazia o prazo sumir em silêncio: a Lista de
+    Protocolos aparecia normal, mas o ícone de resposta ainda não tinha carregado.
+    """
     oc = page.evaluate(
         "()=>{const a=[...document.querySelectorAll('a')].find(x=>"
         "(x.querySelector('img')?.getAttribute('src')||'').includes('intimacao_peticionar_resposta'));"
@@ -464,7 +497,10 @@ def url_peticionar_resposta(page) -> Optional[str]:
     )
     m = re.search(r"window\.location\s*=\s*'([^']+)'", oc or "") or \
         re.search(r"window\.open\('([^']+)'", oc or "")
-    return _abs(m.group(1)) if m else None
+    if m:
+        return _abs(m.group(1))
+    lazy = _resposta_lazy(page)
+    return _abs(lazy) if lazy else None
 
 
 def capturar_prazo(page, resposta_url: str) -> Optional[Prazo]:
